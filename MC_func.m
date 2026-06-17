@@ -17,7 +17,7 @@ function [detect,first_time]=MC_func(R,N,f,beam_type,fasan_D,fasan_d,v_min,v_max
 
 %%
 %========加载光束，填充首尾===========%
-load_dir='D:\pythonandconda\MonteCarlo\path_pi2_2pi\';
+load_dir='G:\BeamVEC_NEW\';
 if omi_type=='fast'
     omiga=2*pi;
 elseif omi_type=='slow'

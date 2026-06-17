@@ -12,7 +12,7 @@ R=2000;
 detect_R=zeros(N,4);detect_L=zeros(N,4);
 first_time_R=zeros(N,4);first_time_L=zeros(N,4);
 % [a,b]=MC_func(R,N,f,'line',150e-3,1e-3,v_min,v_max(1),'fast');
-path='D:\matlab\MC_RESULTS_SNR\';
+path='D:\lzx\MC_RESULTS\';
 
 for i=length(fasan_D_LIST):-1:1
     fasan_D=fasan_D_LIST(i);
