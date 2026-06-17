@@ -30,6 +30,8 @@ for pathIndex = 1:numberOfPaths
 
     figuresBefore = findall(groot, "Type", "figure");
     beam_vectors = lidarpath(f, D, omega, R);
+    % Store paths in the legacy top-to-bottom order used by the MC runs.
+    beam_vectors = flipud(beam_vectors);
     figuresAfter = findall(groot, "Type", "figure");
     close(setdiff(figuresAfter, figuresBefore));
 
