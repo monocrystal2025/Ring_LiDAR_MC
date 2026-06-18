@@ -1,4 +1,4 @@
-function [detect, first_detect] = MC_ring(fasan_D, fasan_d, path1, beam_vec, path2, f, omiga, UP, UV, init_beam_idx, R)
+function [detect, first_detect] = MC_ring_snr(fasan_D, fasan_d, path1, beam_vec, path2, f, omiga, UP, UV, init_beam_idx, R)
 %MC_RING  Monte Carlo detection judgment for annular beam.
 %
 % The geometric hit condition is unchanged: the target is still simplified as
