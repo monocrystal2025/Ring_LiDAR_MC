@@ -18,13 +18,14 @@ function [detect,first_time]=MC_func(R,N,f,beam_type,fasan_D,fasan_d,v_min,v_max
 %%
 %========加载光束，填充首尾===========%
 load_dir='G:\BeamVEC_NEW\';
-if omi_type=='fast'
+if strcmpi(omi_type, 'fast')
     omiga=2*pi;
-elseif omi_type=='slow'
+elseif strcmpi(omi_type, 'slow')
     omiga=pi/2;
+else
+    error('MC_func:UnknownOmiType', ...
+        'Unknown omi_type: %s. Use fast or slow.', omi_type);
 end
-omi_type;
-fasan_D;
 beam_vec=readNPY([load_dir,'beam_vector_',omi_type,'_',num2str(f),'Hz_h3000m_D',num2str(fasan_D*1e6),'u.npy']);
 x0=beam_vec(1,1);y0=beam_vec(1,2);z0=beam_vec(1,3);
 theta0=atan2(y0,x0);r0=sqrt(x0^2+y0^2);
@@ -146,7 +147,7 @@ else
         direction = direction_rand(i); %#ok<NASGU>
 
         if strcmpi(beam_type,'ring')
-            [detect(i), first_detect(i)] = MC_ring(fasan_D,fasan_d, ...
+            [detect(i), first_detect(i)] = MC_ring_snr(fasan_D,fasan_d, ...
                 path1,beam_vec,path2, ...
                 f, omiga, [px,py,pz], [vx,vy,vz], beam_idx, R);
         end

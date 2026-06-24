@@ -1,7 +1,8 @@
-function SNR = MC_single_pulse_snr(beam_type, fasan_D, fasan_d, z)
+function SNR = MC_single_pulse_snr(beam_type, fasan_D, fasan_d, z, illumination_factor, ring_profile)
 %MC_SINGLE_PULSE_SNR  Single-pulse SNR used by MC hit confirmation.
 %
 %   SNR = MC_single_pulse_snr(beam_type, fasan_D, fasan_d, z)
+%   SNR = MC_single_pulse_snr(..., illumination_factor, ring_profile)
 %
 % Inputs
 %   beam_type : 'point', 'line', or 'ring'
@@ -9,13 +10,31 @@ function SNR = MC_single_pulse_snr(beam_type, fasan_D, fasan_d, z)
 %               spot diameter / line length / annular outer diameter
 %   fasan_d   : beam-width divergence wd, rad; ignored for point
 %   z         : target range at the current hit event, m. Vector allowed.
+%   illumination_factor : normalized mean target illumination, where 1 means
+%                         the whole target sees the peak beam intensity.
+%   ring_profile        : 'flat' keeps the legacy annular top-hat model;
+%                         'gaussian' uses fasan_d as the radial 1/e^2 width.
 %
 % The physical parameters are kept identical to lidar_single_pulse_snr_demo.m.
-% The MC contact criterion is still handled outside this function as a point-hit
-% criterion. Once a hit occurs, this function only evaluates the flat-top
-% energy-density-based SNR at the current range.
+
+if nargin < 5 || isempty(illumination_factor)
+    illumination_factor = 1;
+end
+if nargin < 6 || isempty(ring_profile)
+    ring_profile = 'flat';
+end
 
 z = z(:);
+if isscalar(illumination_factor)
+    illumination_factor = repmat(illumination_factor, size(z));
+else
+    illumination_factor = illumination_factor(:);
+end
+if numel(illumination_factor) ~= numel(z)
+    error('MC_single_pulse_snr:SizeMismatch', ...
+        'illumination_factor must be scalar or have the same number of elements as z.');
+end
+illumination_factor = max(illumination_factor, 0);
 SNR = nan(size(z));
 
 %% Physical constants
@@ -69,24 +88,39 @@ switch lower(char(beam_type))
     case 'ring'
         theta_D = fasan_D;
         theta_w = fasan_d;
-        outer_D = theta_D .* z;
-        ring_w = theta_w .* z;
-        inner_D = outer_D - 2 .* ring_w;
+        switch lower(char(ring_profile))
+            case 'flat'
+                outer_D = theta_D .* z;
+                ring_w = theta_w .* z;
+                inner_D = outer_D - 2 .* ring_w;
 
-        % Allow inner_D = 0, which degenerates to a filled disk. Reject only
-        % nonphysical negative inner diameter.
-        valid = inner_D >= 0;
-        Rout = outer_D ./ 2;
-        Rin = max(inner_D, 0) ./ 2;
-        beam_area = pi .* (Rout.^2 - Rin.^2);
-        theta_inner = max(theta_D - 2 .* theta_w, 0);
-        Omega_fov = pi/4 .* (theta_D.^2 - theta_inner.^2);
-        valid = valid & beam_area > 0;
+                % Allow inner_D = 0, which degenerates to a filled disk.
+                valid = inner_D >= 0;
+                Rout = outer_D ./ 2;
+                Rin = max(inner_D, 0) ./ 2;
+                beam_area = pi .* (Rout.^2 - Rin.^2);
+                theta_inner = max(theta_D - 2 .* theta_w, 0);
+                Omega_fov = pi/4 .* (theta_D.^2 - theta_inner.^2);
+                valid = valid & beam_area > 0;
+
+            case 'gaussian'
+                ring_radius = theta_D / 2;
+                gaussian_width = theta_w;
+                Omega_fov = annular_gaussian_effective_solid_angle( ...
+                    ring_radius, gaussian_width);
+                beam_area = Omega_fov .* z.^2;
+                valid = gaussian_width > 0 & Omega_fov > 0 & beam_area > 0;
+
+            otherwise
+                error('Unknown ring_profile: %s. Use flat or gaussian.', ...
+                    ring_profile);
+        end
 
     otherwise
         error('Unknown beam_type: %s. Use point, line, or ring.', beam_type);
 end
 
+valid = valid & isfinite(z) & z > 0 & isfinite(illumination_factor);
 if ~any(valid)
     return;
 end
@@ -98,11 +132,25 @@ N_bg = calc_background_photons( ...
 N_bs = calc_backscatter_photons_vec( ...
     N_tx, eta_sys, A_rx, beta, alpha, z, tau_gate, c);
 
-N_sig = N_tx .* (A_target ./ beam_area) .* rho .* ...
+N_sig = N_tx .* (A_target .* illumination_factor ./ beam_area) .* rho .* ...
         (A_rx ./ (pi .* z.^2)) .* T2_target .* eta_sys;
 
 N_noise = N_bs + N_bg + N_dark;
 SNR(valid) = N_sig(valid) ./ sqrt(N_noise(valid));
+end
+
+function Omega_eff = annular_gaussian_effective_solid_angle(ring_radius, gaussian_width)
+% Integral of exp(-2*((theta-ring_radius)/gaussian_width)^2) over angle.
+
+if gaussian_width <= 0
+    Omega_eff = nan;
+    return;
+end
+
+u0 = -sqrt(2) * ring_radius / gaussian_width;
+radial_integral = ring_radius * gaussian_width * sqrt(pi) / (2 * sqrt(2)) .* ...
+    erfc(u0) + gaussian_width.^2 / 4 .* exp(-2 * (ring_radius ./ gaussian_width).^2);
+Omega_eff = 2 * pi .* radial_integral;
 end
 
 function N_bs = calc_backscatter_photons_vec(N_tx, eta_sys, A_rx, beta, alpha, z, tau_gate, c)

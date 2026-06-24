@@ -1,9 +1,10 @@
-function [detect, first_detect] = MC_ring_snr(fasan_D, fasan_d, path1, beam_vec, path2, f, omiga, UP, UV, init_beam_idx, R)
+function [detect, first_detect] = MC_ring_snr(fasan_D, fasan_d, path1, beam_vec, path2, f, ~, UP, UV, init_beam_idx, R)
 %MC_RING  Monte Carlo detection judgment for annular beam.
 %
-% The geometric hit condition is unchanged: the target is still simplified as
-% a point, and a hit is judged only by the angular relation between the target
-% direction and the annular footprint.
+% The annular beam uses a radial Gaussian profile centered at fasan_D/2.
+% fasan_d is the radial 1/e^2 angular width. The target is no longer treated
+% as a point for the contact judgment: the code averages the normalized
+% Gaussian illumination over the finite target area before calculating SNR.
 %
 % New detection rule:
 %   1) SNR >= 2.80: one hit is accepted as successful detection.
@@ -22,6 +23,14 @@ N_KERNAL = 100000;
 SNR_WEAK = 1.64;
 SNR_STRONG = 2.80;
 CONFIRM_ANGLE = 2 * fasan_D;      % angular interval between two hit events
+TARGET_W = 0.297;                 % m, kept consistent with MC_single_pulse_snr
+GAUSSIAN_CUTOFF_WIDTH = 3;         % ignore tails below exp(-18) before SNR calc
+RING_RADIUS = fasan_D / 2;
+
+if fasan_d <= 0
+    error('MC_ring_snr:InvalidGaussianWidth', ...
+        'fasan_d must be positive for the annular Gaussian profile.');
+end
 
 pending_valid = false;
 pending_beam = [nan, nan, nan];
@@ -37,8 +46,12 @@ UP_norm = norm(UP);
 UP_N = UP ./ UP_norm;
 
 dtheta0 = safe_acos(dot(UP_N, unitvec(B0)));
-if ((fasan_D/2 - fasan_d) <= dtheta0) && (dtheta0 <= fasan_D/2)
-    snr0 = MC_single_pulse_snr('ring', fasan_D, fasan_d, UP_norm);
+if is_ring_gaussian_candidate(dtheta0, UP_norm, TARGET_W, ...
+        RING_RADIUS, fasan_d, GAUSSIAN_CUTOFF_WIDTH)
+    illum0 = ring_gaussian_target_factor(dtheta0, UP_norm, ...
+        TARGET_W, RING_RADIUS, fasan_d);
+    snr0 = MC_single_pulse_snr('ring', fasan_D, fasan_d, UP_norm, ...
+        illum0, 'gaussian');
     if snr0 >= SNR_STRONG
         detect = 1;
         first_detect = 0;
@@ -63,7 +76,8 @@ while true
     norm_P_now = vecnorm(P_now, 2, 2);
 
     dtheta = safe_acos_vec(dot(P_now, B_now, 2) ./ norm_P_now);
-    judge = (((fasan_D/2 - fasan_d) <= dtheta) & (dtheta <= fasan_D/2));
+    judge = is_ring_gaussian_candidate(dtheta, norm_P_now, TARGET_W, ...
+        RING_RADIUS, fasan_d, GAUSSIAN_CUTOFF_WIDTH);
 
     % Keep the original range-exit logic, but prevent invalid out-of-region
     % samples from being accepted inside the current vectorized block.
@@ -73,7 +87,10 @@ while true
     hit_idx = find(judge);
     if ~isempty(hit_idx)
         z_hit = norm_P_now(hit_idx);
-        snr_hit = MC_single_pulse_snr('ring', fasan_D, fasan_d, z_hit);
+        illum_hit = ring_gaussian_target_factor(dtheta(hit_idx), z_hit, ...
+            TARGET_W, RING_RADIUS, fasan_d);
+        snr_hit = MC_single_pulse_snr('ring', fasan_D, fasan_d, z_hit, ...
+            illum_hit, 'gaussian');
 
         for kk = 1:numel(hit_idx)
             this_snr = snr_hit(kk);
@@ -156,4 +173,50 @@ end
 
 function y = safe_acos_vec(x)
 y = acos(max(min(x, 1), -1));
+end
+
+function candidate = is_ring_gaussian_candidate(center_theta, z, target_w, ring_radius, gaussian_width, cutoff_width)
+% Fast geometric prefilter. The exact SNR still comes from target-area
+% averaging; this only skips Gaussian tails that are numerically negligible.
+
+z = z(:);
+center_theta = center_theta(:);
+target_half_diag_theta = atan((sqrt(2) * target_w / 2) ./ z);
+candidate = abs(center_theta - ring_radius) <= ...
+    (target_half_diag_theta + cutoff_width * gaussian_width);
+candidate = candidate & isfinite(center_theta) & isfinite(z) & z > 0;
+end
+
+function factor = ring_gaussian_target_factor(center_theta, z, target_w, ring_radius, gaussian_width)
+% Average normalized annular-Gaussian intensity over a square target.
+%
+% The target side length is target_w, matching the area used in the SNR
+% model. The square is sampled in the local angular tangent plane; because
+% the annular beam is radially symmetric, the square's in-plane orientation
+% has only a second-order effect for these small target angles.
+
+persistent sample_x sample_y
+if isempty(sample_x)
+    grid_n = 7;
+    nodes = ((1:grid_n) - 0.5) ./ grid_n - 0.5;
+    [xx, yy] = meshgrid(nodes, nodes);
+    sample_x = xx(:).';
+    sample_y = yy(:).';
+end
+
+center_theta = center_theta(:);
+z = z(:);
+factor = zeros(size(center_theta));
+
+valid = isfinite(center_theta) & isfinite(z) & z > 0 & gaussian_width > 0;
+if ~any(valid)
+    return;
+end
+
+angular_side = 2 .* atan((target_w / 2) ./ z(valid));
+dx = angular_side .* sample_x;
+dy = angular_side .* sample_y;
+sample_theta = sqrt((center_theta(valid) + dx).^2 + dy.^2);
+sample_intensity = exp(-2 .* ((sample_theta - ring_radius) ./ gaussian_width).^2);
+factor(valid) = mean(sample_intensity, 2);
 end
