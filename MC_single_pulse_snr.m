@@ -14,6 +14,8 @@ function SNR = MC_single_pulse_snr(beam_type, fasan_D, fasan_d, z, illumination_
 %                         the whole target sees the peak beam intensity.
 %   ring_profile        : 'flat' keeps the legacy annular top-hat model;
 %                         'gaussian' uses fasan_d as the radial 1/e^2 width.
+%                         Its receiver FOV is a hard annular mask centered
+%                         at fasan_D/2 with total width 6*fasan_d.
 %
 % The physical parameters are kept identical to lidar_single_pulse_snr_demo.m.
 
@@ -106,10 +108,26 @@ switch lower(char(beam_type))
             case 'gaussian'
                 ring_radius = theta_D / 2;
                 gaussian_width = theta_w;
-                Omega_fov = annular_gaussian_effective_solid_angle( ...
+                Omega_beam = annular_gaussian_effective_solid_angle( ...
                     ring_radius, gaussian_width);
-                beam_area = Omega_fov .* z.^2;
-                valid = gaussian_width > 0 & Omega_fov > 0 & beam_area > 0;
+
+                % Hard annular receiver mask: transmission is one inside
+                % [theta_D/2-3*theta_w, theta_D/2+3*theta_w] and zero
+                % everywhere else.  Use the exact spherical solid angle;
+                % only two scalar cos evaluations are needed per call.
+                fov_half_width = 3 * theta_w;
+                fov_center = theta_D / 2;
+                theta_fov_inner = max(fov_center - fov_half_width, 0);
+                theta_fov_outer = min(fov_center + fov_half_width, pi);
+                Omega_fov = 2 * pi * ...
+                    (cos(theta_fov_inner) - cos(theta_fov_outer));
+
+                % The transmitted beam remains radially Gaussian.  Keep
+                % its effective area separate from the hard receiver FOV.
+                beam_area = Omega_beam .* z.^2;
+                valid = theta_D >= 0 & gaussian_width > 0 & ...
+                    theta_fov_outer > theta_fov_inner & ...
+                    Omega_fov > 0 & Omega_beam > 0 & beam_area > 0;
 
             otherwise
                 error('Unknown ring_profile: %s. Use flat or gaussian.', ...
