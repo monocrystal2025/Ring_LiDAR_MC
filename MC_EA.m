@@ -1,6 +1,6 @@
 clc;clear;close all;
 %=========参数与初始化===========%
-N=50000;
+N=20000;
 f=5e3;
 omi_type='slow';
 beam_type='ring';

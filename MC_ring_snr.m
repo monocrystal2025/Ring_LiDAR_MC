@@ -1,4 +1,4 @@
-function [detect, first_detect] = MC_ring_snr(fasan_D, fasan_d, path1, beam_vec, path2, f, ~, UP, UV, init_beam_idx, R)
+function [detect, first_detect] = MC_ring_snr(fasan_D, fasan_d, path1, beam_vec, path2, f, omiga, UP, UV, init_beam_idx, R)
 %MC_RING  Monte Carlo detection judgment for annular beam.
 %
 % The annular beam uses a radial Gaussian profile centered at fasan_D/2.
@@ -7,22 +7,18 @@ function [detect, first_detect] = MC_ring_snr(fasan_D, fasan_d, path1, beam_vec,
 % Gaussian illumination over the finite target area before calculating SNR.
 %
 % New detection rule:
-%   1) SNR >= 2.80: one hit is accepted as successful detection.
-%   2) 1.64 <= SNR < 2.80: the hit is stored as a candidate. Detection is
-%      accepted only if another hit with SNR >= 1.64 occurs before the LiDAR
-%      pointing direction moves farther than 2*wD from the candidate hit.
-%   3) SNR < 1.64: the hit is ignored.
+%   For every emitted pulse, compute N_sig and N_noise at the target range.
+%   Missed pulses have N_sig = 0 and still contribute N_noise.  A causal
+%   sliding window with M = ceil(f * fasan_D / omiga) pulses is evaluated as
+%       D = sum(N_sig) / sqrt(sum(N_sig) + sum(N_noise)).
+%   Detection is accepted when D >= 2, and first_detect is the tail pulse
+%   index of the first successful window.
 %
 % first_detect is the pulse index at which the warning is actually generated.
-% Therefore, for a weak two-hit confirmation it is the second-hit index.
 
-detect = 0;
-first_detect = nan;
 N_KERNAL = 100000;
 
-SNR_WEAK = 1.64;
-SNR_STRONG = 2.80;
-CONFIRM_ANGLE = 2 * fasan_D;      % angular interval between two hit events
+SNR_THRESHOLD = 2;
 TARGET_W = 0.297;                 % m, kept consistent with MC_single_pulse_snr
 GAUSSIAN_CUTOFF_WIDTH = 3;         % ignore tails below exp(-18) before SNR calc
 RING_RADIUS = fasan_D / 2;
@@ -31,35 +27,41 @@ if fasan_d <= 0
     error('MC_ring_snr:InvalidGaussianWidth', ...
         'fasan_d must be positive for the annular Gaussian profile.');
 end
+if omiga <= 0
+    error('MC_ring_snr:InvalidAngularSpeed', ...
+        'omiga must be positive for sliding-window pulse accumulation.');
+end
 
-pending_valid = false;
-pending_beam = [nan, nan, nan];
+WINDOW_PULSES = max(1, ceil(f * fasan_D / omiga));
+photon_model = get_ring_photon_model(fasan_D, fasan_d, R);
+carry_sig = zeros(0, 1);
+carry_noise = zeros(0, 1);
+carry_step = zeros(0, 1);
 
 %% One complete beam cycle used by the original code
 Beam_all = [beam_vec; path2; flipud(beam_vec); path1];
 L_cycle = size(Beam_all, 1);
 
-%% Check the initial pulse, which corresponds to first_detect = 0
+%% Include the initial pulse, which corresponds to first_detect = 0
 idx0 = mod(init_beam_idx - 1, L_cycle) + 1;
 B0 = Beam_all(idx0, :);
 UP_norm = norm(UP);
 UP_N = UP ./ UP_norm;
 
 dtheta0 = safe_acos(dot(UP_N, unitvec(B0)));
+illum0 = 0;
 if is_ring_gaussian_candidate(dtheta0, UP_norm, TARGET_W, ...
         RING_RADIUS, fasan_d, GAUSSIAN_CUTOFF_WIDTH)
     illum0 = ring_gaussian_target_factor(dtheta0, UP_norm, ...
         TARGET_W, RING_RADIUS, fasan_d);
-    snr0 = MC_single_pulse_snr('ring', fasan_D, fasan_d, UP_norm, ...
-        illum0, 'gaussian');
-    if snr0 >= SNR_STRONG
-        detect = 1;
-        first_detect = 0;
-        return;
-    elseif snr0 >= SNR_WEAK
-        pending_valid = true;
-        pending_beam = B0;
-    end
+end
+noise0 = lookup_ring_noise(photon_model, UP_norm);
+sig0 = calc_ring_signal_photons(photon_model, UP_norm, illum0);
+[detect, first_detect, carry_sig, carry_noise, carry_step] = ...
+    append_and_check_window(carry_sig, carry_noise, carry_step, ...
+    sig0, noise0, 0, WINDOW_PULSES, SNR_THRESHOLD);
+if detect
+    return;
 end
 
 %% Precompute the first block of target positions and beam pointings
@@ -74,57 +76,51 @@ block_id = 1;
 
 while true
     norm_P_now = vecnorm(P_now, 2, 2);
+    out_of_region = (norm_P_now > R) | (P_now(:,3) < 0);
+    exit_idx = find(out_of_region, 1, 'first');
+    if isempty(exit_idx)
+        block_len = N_KERNAL;
+    else
+        block_len = exit_idx - 1;
+    end
 
-    dtheta = safe_acos_vec(dot(P_now, B_now, 2) ./ norm_P_now);
-    judge = is_ring_gaussian_candidate(dtheta, norm_P_now, TARGET_W, ...
-        RING_RADIUS, fasan_d, GAUSSIAN_CUTOFF_WIDTH);
+    if block_len > 0
+        P_block = P_now(1:block_len, :);
+        B_block = B_now(1:block_len, :);
+        z_block = norm_P_now(1:block_len);
 
-    % Keep the original range-exit logic, but prevent invalid out-of-region
-    % samples from being accepted inside the current vectorized block.
-    judge(norm_P_now > R) = false;
-    judge(P_now(:,3) < 0) = false;
+        dtheta = safe_acos_vec(dot(P_block, B_block, 2) ./ z_block);
+        judge = is_ring_gaussian_candidate(dtheta, z_block, TARGET_W, ...
+            RING_RADIUS, fasan_d, GAUSSIAN_CUTOFF_WIDTH);
 
-    hit_idx = find(judge);
-    if ~isempty(hit_idx)
-        z_hit = norm_P_now(hit_idx);
-        illum_hit = ring_gaussian_target_factor(dtheta(hit_idx), z_hit, ...
-            TARGET_W, RING_RADIUS, fasan_d);
-        snr_hit = MC_single_pulse_snr('ring', fasan_D, fasan_d, z_hit, ...
-            illum_hit, 'gaussian');
+        illum_arr = zeros(block_len, 1);
+        hit_idx = find(judge);
+        if ~isempty(hit_idx)
+            illum_arr(hit_idx) = ring_gaussian_target_factor( ...
+                dtheta(hit_idx), z_block(hit_idx), ...
+                TARGET_W, RING_RADIUS, fasan_d);
+        end
 
-        for kk = 1:numel(hit_idx)
-            this_snr = snr_hit(kk);
-            this_beam = B_now(hit_idx(kk), :);
-            this_step = (block_id - 1) * N_KERNAL + hit_idx(kk);
+        % The window rule below intentionally uses sig/noise sums, not a
+        % sqrt(M) equal-variance approximation on per-pulse SNR values.
+        noise_arr = lookup_ring_noise(photon_model, z_block);
+        sig_arr = zeros(block_len, 1);
+        if ~isempty(hit_idx)
+            sig_arr(hit_idx) = calc_ring_signal_photons( ...
+                photon_model, z_block(hit_idx), illum_arr(hit_idx));
+        end
 
-            if this_snr >= SNR_STRONG
-                detect = 1;
-                first_detect = this_step;
-                return;
-            elseif this_snr >= SNR_WEAK
-                if pending_valid
-                    beam_sep = angular_distance(pending_beam, this_beam);
-                    if beam_sep <= CONFIRM_ANGLE
-                        detect = 1;
-                        first_detect = this_step;
-                        return;
-                    else
-                        % The old weak hit is outside the allowed short-time
-                        % angular window. Discard it and start a new candidate.
-                        pending_beam = this_beam;
-                    end
-                else
-                    pending_valid = true;
-                    pending_beam = this_beam;
-                end
-            end
+        step_arr = (block_id - 1) * N_KERNAL + (1:block_len)';
+        [detect, first_detect, carry_sig, carry_noise, carry_step] = ...
+            append_and_check_window(carry_sig, carry_noise, carry_step, ...
+            sig_arr, noise_arr, step_arr, WINDOW_PULSES, SNR_THRESHOLD);
+        if detect
+            return;
         end
     end
 
     % Original termination condition: target has left the detection region.
-    norm_P_tmp = norm_P_now;
-    norm_P_tmp(norm_P_tmp > R) = nan;
-    if any(isnan(norm_P_tmp)) || any(P_now(:,3) < 0)
+    if ~isempty(exit_idx)
         break;
     end
 
@@ -135,6 +131,190 @@ while true
 
     beam_idx = beam_idx + N_KERNAL;
     B_now = cut_loop_simple_anyk(path1, beam_vec, path2, beam_idx, N_KERNAL);
+end
+end
+
+function model = get_ring_photon_model(fasan_D, fasan_d, R)
+% Build and cache deterministic photon-count quantities for annular beams.
+% The cache avoids recomputing range-gate backscatter integrals for every
+% Monte Carlo trajectory.  In a parallel pool, each worker keeps its own
+% persistent copy and rebuilds only when fasan_D/fasan_d/R changes.
+
+persistent cached_model cached_key
+
+key = sprintf('%.17g_%.17g_%.17g', fasan_D, fasan_d, R);
+if ~isempty(cached_model) && strcmp(cached_key, key)
+    model = cached_model;
+    return;
+end
+
+%% Physical constants
+h = 6.62607015e-34;               % J*s
+c = 299792458;                    % m/s
+
+%% System parameters, identical to MC_single_pulse_snr.m
+lambda = 1550e-9;                 % m
+E_pulse = 150e-6;                 % J
+D_rx = 0.0508;                    % m
+A_rx = pi * (D_rx/2)^2;           % m^2
+eta_opt = 0.80;
+eta_det = 0.80;
+eta_sys = eta_opt * eta_det;
+tau_gate = 50e-9;                 % s
+alpha = 1.5e-5;                   % 1/m
+beta = 0.3e-6;                    % 1/(m*sr)
+L_sky_nm = 5e-9;                  % W/(m^2*sr*nm)
+delta_lambda_nm = 10.0;           % nm
+dark_count_rate = 400;            % counts/s
+
+%% Target parameters, identical to MC_single_pulse_snr.m
+target_w = 0.297;                 % m
+A_target = target_w * target_w;   % m^2
+rho = 0.5;
+
+E_photon = h * c / lambda;
+N_tx = E_pulse / E_photon;
+N_dark = dark_count_rate * tau_gate;
+
+ring_radius = fasan_D / 2;
+gaussian_width = fasan_d;
+Omega_beam = annular_gaussian_effective_solid_angle( ...
+    ring_radius, gaussian_width);
+
+fov_half_width = 3 * gaussian_width;
+theta_fov_inner = max(ring_radius - fov_half_width, 0);
+theta_fov_outer = min(ring_radius + fov_half_width, pi);
+Omega_fov = 2 * pi * (cos(theta_fov_inner) - cos(theta_fov_outer));
+
+N_bg = calc_background_photons( ...
+    L_sky_nm, delta_lambda_nm, A_rx, Omega_fov, tau_gate, eta_sys, E_photon);
+
+z_step = 0.5;
+z_lut = (0:z_step:R).';
+if isempty(z_lut) || z_lut(end) < R
+    z_lut = [z_lut; R];
+end
+N_bs_lut = calc_backscatter_photons_vec( ...
+    N_tx, eta_sys, A_rx, beta, alpha, z_lut, tau_gate, c);
+
+model = struct( ...
+    'z_step', z_step, ...
+    'z_lut', z_lut, ...
+    'N_bs_lut', N_bs_lut, ...
+    'N_bg', N_bg, ...
+    'N_dark', N_dark, ...
+    'N_tx', N_tx, ...
+    'A_target', A_target, ...
+    'rho', rho, ...
+    'A_rx', A_rx, ...
+    'eta_sys', eta_sys, ...
+    'alpha', alpha, ...
+    'Omega_beam', Omega_beam);
+
+cached_key = key;
+cached_model = model;
+end
+
+function N_noise = lookup_ring_noise(model, z)
+% Nearest-neighbor lookup on the 0.5 m deterministic backscatter table.
+
+z = z(:);
+idx = round(z ./ model.z_step) + 1;
+idx(~isfinite(idx)) = 1;
+idx = max(1, min(numel(model.N_bs_lut), idx));
+N_noise = model.N_bs_lut(idx) + model.N_bg + model.N_dark;
+end
+
+function N_sig = calc_ring_signal_photons(model, z, illumination_factor)
+% Deterministic target-return photons for annular Gaussian illumination.
+
+z = z(:);
+illumination_factor = illumination_factor(:);
+N_sig = zeros(size(z));
+
+valid = isfinite(z) & z > 0 & isfinite(illumination_factor) & ...
+    illumination_factor > 0 & model.Omega_beam > 0;
+if ~any(valid)
+    return;
+end
+
+beam_area = model.Omega_beam .* z(valid).^2;
+T2_target = exp(-2 * model.alpha .* z(valid));
+N_sig(valid) = model.N_tx .* ...
+    (model.A_target .* illumination_factor(valid) ./ beam_area) .* ...
+    model.rho .* (model.A_rx ./ (pi .* z(valid).^2)) .* ...
+    T2_target .* model.eta_sys;
+end
+
+function [detect, first_detect, carry_sig, carry_noise, carry_step] = ...
+    append_and_check_window(carry_sig, carry_noise, carry_step, ...
+    sig_arr, noise_arr, step_arr, window_pulses, threshold)
+
+detect = 0;
+first_detect = nan;
+
+sig_arr = sig_arr(:);
+noise_arr = noise_arr(:);
+step_arr = step_arr(:);
+if isempty(sig_arr)
+    return;
+end
+
+sig_arr(~isfinite(sig_arr)) = 0;
+noise_arr(~isfinite(noise_arr)) = 0;
+
+n_carry = numel(carry_sig);
+all_sig = [carry_sig; sig_arr];
+all_noise = [carry_noise; noise_arr];
+all_step = [carry_step; step_arr];
+n_all = numel(all_sig);
+
+% A tail pulse with no target signal only adds noise.  It cannot create a
+% new higher-SNR detection that was not already available at the previous
+% signal-bearing pulse.  Therefore evaluate variable-length windows only at
+% newly appended pulses whose N_sig is positive, instead of building a
+% block_len-by-M matrix for every emitted pulse.
+signal_tail_pos = n_carry + find(sig_arr > 0);
+
+if ~isempty(signal_tail_pos)
+    cs_sig = [0; cumsum(all_sig)];
+    cs_noise = [0; cumsum(all_noise)];
+
+    % Variable-length causal windows.  Rows are newly appended signal-bearing
+    % tail pulses; columns are window lengths L = 1...M.  A pulse is accepted
+    % as soon as any length up to M reaches the SNR threshold.  For the same
+    % tail pulse, shorter windows are implicitly preferred by the column order.
+    tail_pos = signal_tail_pos(:);
+    max_len = min(window_pulses, n_all);
+    len_vec = 1:max_len;
+    start_pos = tail_pos - len_vec + 1;
+    valid_len = start_pos >= 1;
+    start_pos(~valid_len) = 1;
+
+    win_sig = cs_sig(tail_pos + 1) - cs_sig(start_pos);
+    win_noise = cs_noise(tail_pos + 1) - cs_noise(start_pos);
+    win_total = win_sig + win_noise;
+    win_snr = win_sig ./ sqrt(win_total);
+    win_snr(~valid_len | win_total <= 0 | ~isfinite(win_snr)) = -inf;
+
+    hit_matrix = win_snr >= threshold;
+    ok = find(any(hit_matrix, 2), 1, 'first');
+    if ~isempty(ok)
+        detect = 1;
+        first_detect = all_step(tail_pos(ok));
+        return;
+    end
+end
+
+n_keep = min(window_pulses - 1, n_all);
+if n_keep > 0
+    carry_sig = all_sig(end - n_keep + 1:end);
+    carry_noise = all_noise(end - n_keep + 1:end);
+    carry_step = all_step(end - n_keep + 1:end);
+else
+    carry_sig = zeros(0, 1);
+    carry_noise = zeros(0, 1);
+    carry_step = zeros(0, 1);
 end
 end
 
@@ -163,16 +343,44 @@ else
 end
 end
 
-function a = angular_distance(v1, v2)
-a = safe_acos(dot(unitvec(v1), unitvec(v2)));
-end
-
 function y = safe_acos(x)
 y = acos(max(min(x, 1), -1));
 end
 
 function y = safe_acos_vec(x)
 y = acos(max(min(x, 1), -1));
+end
+
+function Omega_eff = annular_gaussian_effective_solid_angle(ring_radius, gaussian_width)
+% Integral of exp(-2*((theta-ring_radius)/gaussian_width)^2) over angle.
+
+if gaussian_width <= 0
+    Omega_eff = nan;
+    return;
+end
+
+u0 = -sqrt(2) * ring_radius / gaussian_width;
+radial_integral = ring_radius * gaussian_width * sqrt(pi) / (2 * sqrt(2)) .* ...
+    erfc(u0) + gaussian_width.^2 / 4 .* exp(-2 * (ring_radius ./ gaussian_width).^2);
+Omega_eff = 2 * pi .* radial_integral;
+end
+
+function N_bs = calc_backscatter_photons_vec(N_tx, eta_sys, A_rx, beta, alpha, z, tau_gate, c)
+% Vectorized deterministic backscatter expectation over the range gate.
+
+dr = c * tau_gate / 2;
+offsets = linspace(-dr/2, dr/2, 101);
+r = z(:) + offsets;
+r(r <= 0) = 1e-6;
+integrand = beta .* exp(-2 .* alpha .* r) ./ (r.^2);
+integ = trapz(offsets, integrand, 2);
+N_bs = N_tx .* eta_sys .* A_rx .* integ;
+end
+
+function N_bg = calc_background_photons(L_sky_nm, delta_lambda_nm, A_rx, Omega_fov, tau_gate, eta_sys, E_photon)
+P_bg = L_sky_nm .* delta_lambda_nm .* A_rx .* Omega_fov;
+E_bg = P_bg .* tau_gate;
+N_bg = E_bg .* eta_sys ./ E_photon;
 end
 
 function candidate = is_ring_gaussian_candidate(center_theta, z, target_w, ring_radius, gaussian_width, cutoff_width)

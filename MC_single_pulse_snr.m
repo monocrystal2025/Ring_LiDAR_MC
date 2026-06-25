@@ -1,8 +1,8 @@
-function SNR = MC_single_pulse_snr(beam_type, fasan_D, fasan_d, z, illumination_factor, ring_profile)
+function [SNR, N_sig, N_noise] = MC_single_pulse_snr(beam_type, fasan_D, fasan_d, z, illumination_factor, ring_profile)
 %MC_SINGLE_PULSE_SNR  Single-pulse SNR used by MC hit confirmation.
 %
 %   SNR = MC_single_pulse_snr(beam_type, fasan_D, fasan_d, z)
-%   SNR = MC_single_pulse_snr(..., illumination_factor, ring_profile)
+%   [SNR, N_sig, N_noise] = MC_single_pulse_snr(...)
 %
 % Inputs
 %   beam_type : 'point', 'line', or 'ring'
@@ -18,6 +18,8 @@ function SNR = MC_single_pulse_snr(beam_type, fasan_D, fasan_d, z, illumination_
 %                         at fasan_D/2 with total width 6*fasan_d.
 %
 % The physical parameters are kept identical to lidar_single_pulse_snr_demo.m.
+% Single-pulse detectability includes signal shot noise:
+%   SNR = N_sig / sqrt(N_sig + N_noise).
 
 if nargin < 5 || isempty(illumination_factor)
     illumination_factor = 1;
@@ -38,6 +40,8 @@ if numel(illumination_factor) ~= numel(z)
 end
 illumination_factor = max(illumination_factor, 0);
 SNR = nan(size(z));
+N_sig = nan(size(z));
+N_noise = nan(size(z));
 
 %% Physical constants
 h = 6.62607015e-34;               % J*s
@@ -150,11 +154,13 @@ N_bg = calc_background_photons( ...
 N_bs = calc_backscatter_photons_vec( ...
     N_tx, eta_sys, A_rx, beta, alpha, z, tau_gate, c);
 
-N_sig = N_tx .* (A_target .* illumination_factor ./ beam_area) .* rho .* ...
+N_sig_all = N_tx .* (A_target .* illumination_factor ./ beam_area) .* rho .* ...
         (A_rx ./ (pi .* z.^2)) .* T2_target .* eta_sys;
 
-N_noise = N_bs + N_bg + N_dark;
-SNR(valid) = N_sig(valid) ./ sqrt(N_noise(valid));
+N_noise_all = N_bs + N_bg + N_dark;
+N_sig(valid) = N_sig_all(valid);
+N_noise(valid) = N_noise_all(valid);
+SNR(valid) = N_sig(valid) ./ sqrt(N_sig(valid) + N_noise(valid));
 end
 
 function Omega_eff = annular_gaussian_effective_solid_angle(ring_radius, gaussian_width)
