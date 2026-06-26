@@ -277,9 +277,6 @@ n_all = numel(all_sig);
 signal_tail_pos = n_carry + find(sig_arr > 0);
 
 if ~isempty(signal_tail_pos)
-    cs_sig = [0; cumsum(all_sig)];
-    cs_noise = [0; cumsum(all_noise)];
-
     % Variable-length causal windows.  Rows are newly appended signal-bearing
     % tail pulses; columns are window lengths L = 1...M.  A pulse is accepted
     % as soon as any length up to M reaches the SNR threshold.  For the same
@@ -291,11 +288,16 @@ if ~isempty(signal_tail_pos)
     valid_len = start_pos >= 1;
     start_pos(~valid_len) = 1;
 
-    win_sig = cs_sig(tail_pos + 1) - cs_sig(start_pos);
-    win_noise = cs_noise(tail_pos + 1) - cs_noise(start_pos);
-    win_total = win_sig + win_noise;
-    win_snr = win_sig ./ sqrt(win_total);
-    win_snr(~valid_len | win_total <= 0 | ~isfinite(win_snr)) = -inf;
+    pulse_var = all_sig + all_noise;
+    pulse_score = zeros(size(all_sig));
+    score_valid = all_sig > 0 & pulse_var > 0 & isfinite(pulse_var);
+    pulse_score(score_valid) = all_sig(score_valid).^2 ./ ...
+        pulse_var(score_valid);
+    cs_score = [0; cumsum(pulse_score)];
+
+    win_score = cs_score(tail_pos + 1) - cs_score(start_pos);
+    win_snr = sqrt(win_score);
+    win_snr(~valid_len | win_score <= 0 | ~isfinite(win_snr)) = -inf;
 
     hit_matrix = win_snr >= threshold;
     ok = find(any(hit_matrix, 2), 1, 'first');
