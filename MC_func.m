@@ -100,6 +100,17 @@ direction_rand = randi([0,1], N, 1)*2 - 1;
 detect = zeros(N,1);
 first_detect = zeros(N,1);
 
+isRing = strcmpi(beam_type,'ring');
+isPoint = strcmpi(beam_type,'point');
+isLine = strcmpi(beam_type,'line');
+if ~(isRing || isPoint || isLine)
+    error('MC_func:UnknownBeamType', ...
+        'Unknown beam_type: %s. Use ring, point, or line.', beam_type);
+end
+
+UAV_P_x = UAV_P(:,1); UAV_P_y = UAV_P(:,2); UAV_P_z = UAV_P(:,3);
+UAV_V_x = UAV_V(:,1); UAV_V_y = UAV_V(:,2); UAV_V_z = UAV_V(:,3);
+
 % ===== 并行池：只创建一次（MC_func多次调用时复用），避免反复启动开销 =====
 useParallel = license('test','Distrib_Computing_Toolbox') && ~isempty(ver('parallel'));
 if useParallel
@@ -118,46 +129,42 @@ end
 tic
 if useParallel
     parfor i = 1:N
-        px = UAV_P(i,1); py = UAV_P(i,2); pz = UAV_P(i,3);
-        vx = UAV_V(i,1); vy = UAV_V(i,2); vz = UAV_V(i,3);
+        px = UAV_P_x(i); py = UAV_P_y(i); pz = UAV_P_z(i);
+        vx = UAV_V_x(i); vy = UAV_V_y(i); vz = UAV_V_z(i);
         beam_idx = beam_idx_rand(i);
         direction = direction_rand(i); %#ok<NASGU>  % 你目前没用到direction，先保留不改
 
-        if strcmpi(beam_type,'ring')
+        if isRing
             [detect(i), first_detect(i)] = MC_ring_snr(fasan_D,fasan_d, ...
                 path1,beam_vec,path2, ...
                 f, omiga, [px,py,pz], [vx,vy,vz], beam_idx, R);
-        end
-        if strcmpi(beam_type,'point')
+        elseif isPoint
             [detect(i), first_detect(i)] = MC_point(fasan_D,fasan_d, ...
                 path1,beam_vec,path2, ...
                 f, omiga, [px,py,pz], [vx,vy,vz], beam_idx, R);
-        end
-        if strcmpi(beam_type,'line')
-            [detect(i), first_detect(i)] = MC_line(fasan_D,fasan_d, ...
+        elseif isLine
+            [detect(i), first_detect(i)] = MC_line_snr(fasan_D,fasan_d, ...
                 path1,beam_vec,path2, ...
                 f, omiga, [px,py,pz], [vx,vy,vz], beam_idx, R);
         end
     end
 else
     for i = 1:N
-        px = UAV_P(i,1); py = UAV_P(i,2); pz = UAV_P(i,3);
-        vx = UAV_V(i,1); vy = UAV_V(i,2); vz = UAV_V(i,3);
+        px = UAV_P_x(i); py = UAV_P_y(i); pz = UAV_P_z(i);
+        vx = UAV_V_x(i); vy = UAV_V_y(i); vz = UAV_V_z(i);
         beam_idx = beam_idx_rand(i);
         direction = direction_rand(i); %#ok<NASGU>
 
-        if strcmpi(beam_type,'ring')
+        if isRing
             [detect(i), first_detect(i)] = MC_ring_snr(fasan_D,fasan_d, ...
                 path1,beam_vec,path2, ...
                 f, omiga, [px,py,pz], [vx,vy,vz], beam_idx, R);
-        end
-        if strcmpi(beam_type,'point')
+        elseif isPoint
             [detect(i), first_detect(i)] = MC_point(fasan_D,fasan_d, ...
                 path1,beam_vec,path2, ...
                 f, omiga, [px,py,pz], [vx,vy,vz], beam_idx, R);
-        end
-        if strcmpi(beam_type,'line')
-            [detect(i), first_detect(i)] = MC_line(fasan_D,fasan_d, ...
+        elseif isLine
+            [detect(i), first_detect(i)] = MC_line_snr(fasan_D,fasan_d, ...
                 path1,beam_vec,path2, ...
                 f, omiga, [px,py,pz], [vx,vy,vz], beam_idx, R);
         end

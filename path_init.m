@@ -2,7 +2,7 @@
 f = 5e3;
 R = 1000;
 omega = 2 * pi;
-fasan_D_list = 5e-3:5e-3:200e-3;
+fasan_D_list = 5e-3:5e-3:500e-3;
 
 load_dir = "G:\BeamVEC_NEW";
 
