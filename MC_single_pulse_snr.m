@@ -16,6 +16,8 @@ function [SNR, N_sig, N_noise] = MC_single_pulse_snr(beam_type, fasan_D, fasan_d
 %                         'gaussian' uses fasan_d as the radial 1/e^2 width.
 %                         Its receiver FOV is a hard annular mask centered
 %                         at fasan_D/2 with total width 6*fasan_d.
+%   For point beams, fasan_D is the full angle at the exp(-2) Gaussian
+%   intensity contour, and the receiver FOV full angle is 3*fasan_D.
 %
 % The physical parameters are kept identical to lidar_single_pulse_snr_demo.m.
 % Single-pulse detectability includes signal shot noise:
@@ -76,11 +78,14 @@ N_dark = dark_count_rate * tau_gate;
 %% Beam-shape-dependent illuminated area and matched-FOV solid angle
 switch lower(char(beam_type))
     case 'point'
-        theta_D = fasan_D;
-        spot_D = theta_D .* z;
-        beam_area = pi .* (spot_D ./ 2).^2;
-        Omega_fov = pi .* (theta_D ./ 2).^2;
-        valid = beam_area > 0;
+        gaussian_half_angle = fasan_D / 2;
+        fov_half_angle = min(3 * gaussian_half_angle, pi);
+        Omega_beam = point_gaussian_effective_solid_angle( ...
+            gaussian_half_angle);
+        Omega_fov = 2 * pi * (1 - cos(fov_half_angle));
+        beam_area = Omega_beam .* z.^2;
+        valid = gaussian_half_angle > 0 & Omega_fov > 0 & ...
+            Omega_beam > 0 & beam_area > 0;
 
     case 'line'
         theta_D = fasan_D;
@@ -161,6 +166,19 @@ N_noise_all = N_bs + N_bg + N_dark;
 N_sig(valid) = N_sig_all(valid);
 N_noise(valid) = N_noise_all(valid);
 SNR(valid) = N_sig(valid) ./ sqrt(N_sig(valid) + N_noise(valid));
+end
+
+function Omega_eff = point_gaussian_effective_solid_angle(gaussian_half_angle)
+% Exact spherical solid angle of exp(-2*(theta/theta_w)^2).
+
+if gaussian_half_angle <= 0
+    Omega_eff = nan;
+    return;
+end
+
+integrand = @(theta) exp(-2 .* (theta ./ gaussian_half_angle).^2) .* sin(theta);
+Omega_eff = 2 * pi * integral(integrand, 0, pi, ...
+    'RelTol', 1e-10, 'AbsTol', 1e-14);
 end
 
 function Omega_eff = annular_gaussian_effective_solid_angle(ring_radius, gaussian_width)
