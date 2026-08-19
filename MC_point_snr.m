@@ -1,9 +1,12 @@
-function [detect, first_detect] = MC_point_snr(fasan_D, ~, path1, beam_vec, path2, f, omiga, UP, UV, init_beam_idx, R)
+function [detect, first_detect, first_encounter, effective_pulses] = MC_point_snr(fasan_D, ~, path1, beam_vec, path2, f, omiga, UP, UV, init_beam_idx, R)
 %MC_POINT_SNR  Monte Carlo detection judgment for a Gaussian point beam.
 %
 % fasan_D is the full divergence angle at the exp(-2) intensity contour.
 % The Gaussian half-angle width is therefore fasan_D/2.  The receiver FOV is
 % a hard circular cone with full angle 3*fasan_D.
+% first_encounter is the pulse-index difference from region entry (pulse 0)
+% to the first geometric-prefilter hit. effective_pulses counts positive-score
+% pulses in the shortest successful window at first_detect.
 
 N_KERNAL = 100000;
 
@@ -26,6 +29,7 @@ photon_model = get_point_photon_model(fasan_D, R);
 carry_sig = zeros(0, 1);
 carry_noise = zeros(0, 1);
 carry_step = zeros(0, 1);
+first_encounter = nan;
 
 %% One complete beam cycle used by the original code
 Beam_all = [beam_vec; path2; flipud(beam_vec); path1];
@@ -39,15 +43,17 @@ UP_N = UP ./ UP_norm;
 
 cos_theta0 = dot(UP_N, unitvec(B0));
 illum0 = 0;
-if is_point_gaussian_candidate_from_cos(cos_theta0, UP_norm, ...
-        TARGET_W, FOV_HALF_ANGLE)
+initial_candidate = is_point_gaussian_candidate_from_cos(cos_theta0, ...
+    UP_norm, TARGET_W, FOV_HALF_ANGLE);
+if initial_candidate
+    first_encounter = 0;
     dtheta0 = safe_acos(cos_theta0);
     illum0 = point_gaussian_target_factor(dtheta0, UP_norm, ...
         TARGET_W, GAUSSIAN_HALF_ANGLE, FOV_HALF_ANGLE);
 end
 noise0 = lookup_point_noise(photon_model, UP_norm);
 sig0 = calc_point_signal_photons(photon_model, UP_norm, illum0);
-[detect, first_detect, carry_sig, carry_noise, carry_step] = ...
+[detect, first_detect, effective_pulses, carry_sig, carry_noise, carry_step] = ...
     append_and_check_window(carry_sig, carry_noise, carry_step, ...
     sig0, noise0, 0, WINDOW_PULSES, SNR_THRESHOLD);
 if detect
@@ -85,6 +91,10 @@ while true
 
         illum_arr = zeros(block_len, 1);
         hit_idx = find(judge);
+        step_arr = (block_id - 1) * N_KERNAL + (1:block_len)';
+        if isnan(first_encounter) && ~isempty(hit_idx)
+            first_encounter = step_arr(hit_idx(1));
+        end
         if ~isempty(hit_idx)
             dtheta = safe_acos_vec(cos_theta(hit_idx));
             illum_arr(hit_idx) = point_gaussian_target_factor( ...
@@ -99,8 +109,7 @@ while true
                 photon_model, z_block(hit_idx), illum_arr(hit_idx));
         end
 
-        step_arr = (block_id - 1) * N_KERNAL + (1:block_len)';
-        [detect, first_detect, carry_sig, carry_noise, carry_step] = ...
+        [detect, first_detect, effective_pulses, carry_sig, carry_noise, carry_step] = ...
             append_and_check_window(carry_sig, carry_noise, carry_step, ...
             sig_arr, noise_arr, step_arr, WINDOW_PULSES, SNR_THRESHOLD);
         if detect
@@ -226,12 +235,13 @@ N_sig(valid) = model.N_tx .* ...
     T2_target .* model.eta_sys;
 end
 
-function [detect, first_detect, carry_sig, carry_noise, carry_step] = ...
+function [detect, first_detect, effective_pulses, carry_sig, carry_noise, carry_step] = ...
     append_and_check_window(carry_sig, carry_noise, carry_step, ...
     sig_arr, noise_arr, step_arr, window_pulses, threshold)
 
 detect = 0;
 first_detect = nan;
+effective_pulses = nan;
 
 sig_arr = sig_arr(:);
 noise_arr = noise_arr(:);
@@ -273,8 +283,12 @@ if ~isempty(signal_tail_pos)
     hit_matrix = win_snr >= threshold;
     ok = find(any(hit_matrix, 2), 1, 'first');
     if ~isempty(ok)
+        successful_len = find(hit_matrix(ok, :), 1, 'first');
+        successful_start = start_pos(ok, successful_len);
         detect = 1;
         first_detect = all_step(tail_pos(ok));
+        effective_pulses = nnz( ...
+            pulse_score(successful_start:tail_pos(ok)) > 0);
         return;
     end
 end

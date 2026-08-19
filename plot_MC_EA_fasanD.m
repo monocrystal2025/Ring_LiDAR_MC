@@ -2,8 +2,9 @@ clc; clear; close all;
 
 % Plot MC_EA result curves from generated .mat files.
 resultDir = 'D:\lzx\MC_RESULTS\';
-fasan_D_LIST = 5e-3:10e-3:500e-3;
-fasan_d = 0.8e-3;
+% resultDir = 'G:\MC_RESULTS\正常结果\MC_RESULTS\';
+fasan_D_LIST = 5e-3:5e-3:400e-3;
+fasan_d = 1e-3;
 colIdx = 1;
 
 scriptDir = fileparts(mfilename('fullpath'));
@@ -14,8 +15,10 @@ end
 fasan_D_mrad = fasan_D_LIST * 1e3;
 probLine = nan(size(fasan_D_LIST));
 probRing = nan(size(fasan_D_LIST));
+probPointRaw = nan(size(fasan_D_LIST));
 timeLine = nan(size(fasan_D_LIST));
 timeRing = nan(size(fasan_D_LIST));
+timePointRaw = nan(size(fasan_D_LIST));
 
 for k = 1:numel(fasan_D_LIST)
     DText = num2str(fasan_D_mrad(k), '%g');
@@ -25,6 +28,8 @@ for k = 1:numel(fasan_D_LIST)
         ['MC_1par_EA_RING_D', DText, 'd', dText, 'mrad.mat']);
     lineFile = fullfile(resultDir, ...
         ['MC_1par_EA_LINE_D', DText, 'd', dText, 'mrad.mat']);
+    pointFile = fullfile(resultDir, ...
+        ['MC_1par_EA_POINT_D', DText, 'mrad.mat']);
 
     if isfile(ringFile)
         S = load(ringFile, 'detect_R', 'first_time_R');
@@ -41,41 +46,61 @@ for k = 1:numel(fasan_D_LIST)
     else
         warning('Missing line result: %s', lineFile);
     end
+
+    if isfile(pointFile)
+        S = load(pointFile, 'detect_P', 'first_time_P');
+        [probPointRaw(k), timePointRaw(k)] = summarizeMCResult( ...
+            S.detect_P(:, colIdx), S.first_time_P(:, colIdx));
+    end
 end
 
-fig = figure('Color', 'w', 'Position', [100, 100, 1100, 800]);
+probPoint = fillMissingByInterpolation(fasan_D_mrad, probPointRaw, 'point probability');
+timePoint = fillMissingByInterpolation(fasan_D_mrad, timePointRaw, 'point first warning time');
 
-subplot(2, 1, 1);
-pLineProb = plot(fasan_D_mrad, probLine, '-o', 'LineWidth', 1.8, ...
-    'MarkerSize', 5, 'DisplayName', '线光');
+fig = figure('Position', [100, 100, 530, 600]);
+t = tiledlayout(fig, 2, 1, 'TileSpacing', 'compact', 'Padding', 'compact');
+
+axProb = nexttile(t);
+pLineProb = plot(fasan_D_mrad, 100 * probLine, '-o', 'LineWidth', 1.8, ...
+    'MarkerSize', 5, 'DisplayName', 'line');
 hold on;
-pRingProb = plot(fasan_D_mrad, probRing, '-s', 'LineWidth', 1.8, ...
-    'MarkerSize', 5, 'DisplayName', '环光');
-markCurveExtremum(fasan_D_mrad, probLine, 'max', pLineProb.Color, '线光最大值');
-markCurveExtremum(fasan_D_mrad, probRing, 'max', pRingProb.Color, '环光最大值');
+pRingProb = plot(fasan_D_mrad, 100 * probRing, '-s', 'LineWidth', 1.8, ...
+    'MarkerSize', 5, 'DisplayName', 'annular');
+pPointProb = plot(fasan_D_mrad, 100 * probPoint, '-^', 'LineWidth', 1.8, ...
+    'MarkerSize', 5, 'Color', [0.4660, 0.6740, 0.1880], ...
+    'DisplayName', 'spot');
 grid on;
 box on;
-xlabel('fasan_D (mrad)', 'Interpreter', 'none');
-ylabel('概率');
-title('概率 - fasan_D', 'Interpreter', 'none');
-legend('Location', 'best');
+xlabel('{\it w}_{\rmD} (mrad)', 'Interpreter', 'tex');
+ylabel('{\it P}_{\rmdetect} (%)', 'Interpreter', 'tex');
+xticks(0:100:500);
+yticks(0:25:100);
+set(axProb, 'FontName', 'Helvetica', 'FontSize', 13, 'LineWidth', 2,'XScale','linear');
+set([axProb.XLabel, axProb.YLabel], 'FontName', 'Helvetica', 'FontSize', 13);
 
-subplot(2, 1, 2);
+axTime = nexttile(t);
 pLineTime = plot(fasan_D_mrad, timeLine, '-o', 'LineWidth', 1.8, ...
-    'MarkerSize', 5, 'DisplayName', '线光');
+    'MarkerSize', 5, 'DisplayName', 'line');
 hold on;
 pRingTime = plot(fasan_D_mrad, timeRing, '-s', 'LineWidth', 1.8, ...
-    'MarkerSize', 5, 'DisplayName', '环光');
-markCurveExtremum(fasan_D_mrad, timeLine, 'min', pLineTime.Color, '线光最小值');
-markCurveExtremum(fasan_D_mrad, timeRing, 'min', pRingTime.Color, '环光最小值');
+    'MarkerSize', 5, 'DisplayName', 'annular');
+pPointTime = plot(fasan_D_mrad, timePoint, '-^', 'LineWidth', 1.8, ...
+    'MarkerSize', 5, 'Color', pPointProb.Color, ...
+    'DisplayName', 'spot');
 grid on;
 box on;
-xlabel('fasan_D (mrad)', 'Interpreter', 'none');
-ylabel('首次预警时长 (s)');
-title('首次预警时长 - fasan_D', 'Interpreter', 'none');
-legend('Location', 'best');
-
-sgtitle('MC_EA 仿真结果', 'Interpreter', 'none');
+xlabel('{\it w}_{\rmD} (mrad)', 'Interpreter', 'tex');
+ylabel(['{\it t' char(773) '}_{\rm warn} (s)'], 'Interpreter', 'tex');
+xticks(0:100:500);
+set(axTime, 'FontName', 'Helvetica', 'FontSize', 13, 'LineWidth', 2);
+set([axTime.XLabel, axTime.YLabel], 'FontName', 'Helvetica', 'FontSize', 13);
+lgd = legend(axProb, [pPointProb, pLineProb, pRingProb], ...
+    {'spot', 'line', 'annular'}, 'Location', 'best', ...
+    'FontName', 'Helvetica', 'FontSize', 13);
+lgd.Layout.Tile = 'north';
+lgd.NumColumns = 3;
+lgd.Box = 'off';
+lgd.ItemTokenSize = [50, 18];
 
 outPng = fullfile(scriptDir, 'MC_EA_fasan_D_summary.png');
 outFig = fullfile(scriptDir, 'MC_EA_fasan_D_summary.fig');
@@ -100,57 +125,28 @@ else
 end
 end
 
-function markCurveExtremum(x, y, mode, color, labelText)
+function yFilled = fillMissingByInterpolation(x, yRaw, dataName)
 x = x(:);
-y = y(:);
-valid = isfinite(x) & isfinite(y);
+yRaw = yRaw(:);
+yFilled = yRaw;
+valid = isfinite(x) & isfinite(yRaw);
+
 if ~any(valid)
+    warning('No valid %s data found. The curve will remain NaN.', dataName);
     return;
 end
 
-validIdx = find(valid);
-switch lower(mode)
-    case 'max'
-        [value, localIdx] = max(y(valid));
-        verticalAlignment = 'bottom';
-        ySign = 1;
-    case 'min'
-        [value, localIdx] = min(y(valid));
-        verticalAlignment = 'top';
-        ySign = -1;
-    otherwise
-        error('Unknown mode: %s. Use max or min.', mode);
+if nnz(valid) == 1
+    yFilled(:) = yRaw(valid);
+    warning('Only one valid %s data point found. Filled missing values with that value.', dataName);
+    return;
 end
 
-idx = validIdx(localIdx);
-xValue = x(idx);
-xValid = x(valid);
-xRange = max(xValid) - min(xValid);
-if xRange == 0
-    xRange = 1;
+missing = ~isfinite(yFilled);
+if any(missing)
+    yFilled(missing) = interp1(x(valid), yRaw(valid), x(missing), 'pchip', 'extrap');
+    fprintf('Filled %d missing %s points by pchip interpolation.\n', nnz(missing), dataName);
 end
 
-yLimits = ylim;
-yOffset = 0.035 * (max(yLimits) - min(yLimits));
-if yOffset == 0
-    yOffset = 0.05 * max(abs(value), 1);
-end
-
-plot(xValue, value, 'p', ...
-    'MarkerSize', 15, ...
-    'MarkerFaceColor', color, ...
-    'MarkerEdgeColor', 'k', ...
-    'LineWidth', 1.1, ...
-    'HandleVisibility', 'off');
-
-text(xValue + 0.012 * xRange, value + ySign * yOffset, ...
-    sprintf('%s\nD=%.0f mrad, %.3g', labelText, xValue, value), ...
-    'Color', color, ...
-    'FontSize', 10, ...
-    'FontWeight', 'bold', ...
-    'VerticalAlignment', verticalAlignment, ...
-    'BackgroundColor', 'w', ...
-    'Margin', 2, ...
-    'Interpreter', 'none', ...
-    'HandleVisibility', 'off');
+yFilled = reshape(yFilled, size(yRaw));
 end
