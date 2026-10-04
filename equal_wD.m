@@ -86,39 +86,54 @@ for scenarioIndex = 1:numberOfScenarios
 end
 fprintf("\n");
 
-figureHandle = figure("Color", "w", "Position", [80, 80, 710, 660]);
-layout = tiledlayout(figureHandle, 2, 2, ...
-    "TileSpacing", "compact", "Padding", "compact");
+% Fixed asymmetric limits. Kappa=1 is at 80% of the colorbar length;
+% each side has its own linear scale.
+% See equal_wD_colormap_notes.md for references and interpretation.
+finiteKappa = [results.Kappa];
+finiteKappa = finiteKappa(isfinite(finiteKappa));
+assert(~isempty(finiteKappa), "No finite kappa values to plot.");
+kappaLimits = [0.45, 1.05];
 
-% Tile (1,1) contains two coordinated views explaining one heat-map cell.
-methodLayout = tiledlayout(layout, 1, 2, ...
+figureHandle = figure("Color", "w", "Position", [80, 80, 850, 400]);
+layout = tiledlayout(figureHandle, 1, 3, ...
     "TileSpacing", "compact", "Padding", "compact");
-methodLayout.Layout.Tile = 1;
-drawMethodSchematic(methodLayout, results(1).Series, timeThresholds_s);
 
 heatmapAxes = gobjects(1, numberOfScenarios);
-tileNumbers = [2, 3, 4];
+
 for scenarioIndex = 1:numberOfScenarios
-    heatmapAxes(scenarioIndex) = nexttile(layout, tileNumbers(scenarioIndex));
+    heatmapAxes(scenarioIndex) = nexttile(layout, scenarioIndex);
     plotKappaHeatmap(heatmapAxes(scenarioIndex), ...
         timeThresholds_s, targetProbabilities, ...
-        results(scenarioIndex).Kappa, scenarioInfo(scenarioIndex).title);
+        results(scenarioIndex).Kappa, scenarioInfo(scenarioIndex).title, ...
+        kappaLimits);
+end
+% The center axes places the shared label above the south colorbar.
+xlabel(heatmapAxes(2), "First-warning time (s)", "FontSize", 14);
+ylabel(heatmapAxes(1), "Detection probability (%)", ...
+    "Interpreter", "tex", "FontSize", 14);
+for scenarioIndex = 2:numberOfScenarios
+    yticklabels(heatmapAxes(scenarioIndex), []);
 end
 
-colormap(figureHandle, ratioColormap(513));
-set(heatmapAxes, "CLim", [0.5, 1.5]);
+colormap(figureHandle, ratioColormap(1001, kappaLimits));
+set(heatmapAxes, "CLim", [0, 1]);
 
-% One shared colorbar below the entire 2-by-2 layout.
+% One shared colorbar below the entire 1-by-3 layout.
 colorbarHandle = colorbar(heatmapAxes(1));
 colorbarHandle.Layout.Tile = "south";
-colorbarHandle.Limits = [0.5, 1.5];
-colorbarHandle.Ticks = 0.5:0.1:1.5;
+colorbarHandle.Limits = [0, 1];
+% Positions are transformed, labels are the original physical ratios.
+lowerTicks = [0.45, 0.55, 0.65, 0.75, 0.85, 0.95, 1];
+upperTicks = [1, 1.025, 1.05];
+kappaTicks = [lowerTicks, upperTicks(2:end)];
+colorbarHandle.Ticks = ratioPosition(kappaTicks, kappaLimits);
+colorbarHandle.TickLabels = compose("%.4g", kappaTicks);
 colorbarHandle.Label.String = ...
-    "\kappa = w_{D, min}^{Annular} / w_{D, min}^{Line}";
+    "\kappa = {\itw}_{D, Min}^{Annular} / w_{D, Min}^{Line}";
 colorbarHandle.Label.Interpreter = "tex";
-colorbarHandle.Label.FontSize = 12;
+colorbarHandle.Label.FontSize = 14;
 colorbarHandle.FontName = "Helvetica";
-colorbarHandle.FontSize = 12;
+colorbarHandle.FontSize = 14;
 
 
 outputBase = fullfile(scriptDir, "equal_wD");
@@ -129,7 +144,7 @@ outputMat = outputBase + ".mat";
 
 writetable(allRows, outputCsv);
 save(outputMat, "results", "scenarioInfo", "timeThresholds_s", ...
-    "targetProbabilities", "smallWdMrad", "eaColumnIndex");
+    "targetProbabilities", "smallWdMrad", "eaColumnIndex", "kappaLimits");
 exportgraphics(figureHandle, outputPng, "Resolution", 300);
 savefig(figureHandle, outputFig);
 
@@ -270,131 +285,6 @@ commonPerformanceRegion = isfinite(lineMinimum) & isfinite(ringMinimum);
 kappa(~commonPerformanceRegion) = nan;
 end
 
-function drawMethodSchematic(methodLayout, eaSeries, timeThresholds_s)
-%DRAWMETHODSCHEMATIC Show time selection and minimum-wD inversion.
-exampleTime_s = 30;
-exampleProbability = 0.88;
-timeIndex = find(timeThresholds_s == exampleTime_s, 1);
-assert(~isempty(timeIndex), "The schematic example time is unavailable.");
-
-lineSeries = eaSeries(2);
-ringSeries = eaSeries(3);
-lineMinimum = firstMonotoneCrossing(lineSeries.WD_mrad, ...
-    lineSeries.PD(timeIndex, :), exampleProbability);
-ringMinimum = firstMonotoneCrossing(ringSeries.WD_mrad, ...
-    ringSeries.PD(timeIndex, :), exampleProbability);
-kappaExample = ringMinimum / lineMinimum;
-
-lineMinimumCurve = probabilityCurveAtWidth(lineSeries, lineMinimum);
-ringMinimumCurve = probabilityCurveAtWidth(ringSeries, ringMinimum);
-lineProbabilityVsWD = cummax(lineSeries.PD(timeIndex, :).');
-ringProbabilityVsWD = cummax(ringSeries.PD(timeIndex, :).');
-
-lineColor = [0.00, 0.45, 0.74];
-ringColor = [0.85, 0.33, 0.10];
-referenceColor = [0.28, 0.30, 0.32];
-
-% Left: a compact P_D(t) view selects one heat-map coordinate.
-timeAxes = nexttile(methodLayout, 1);
-hold(timeAxes, "on");
-grid(timeAxes, "on");
-box(timeAxes, "on");
-xline(timeAxes, exampleTime_s, ":", "Color", referenceColor, ...
-    "LineWidth", 1.5);
-yline(timeAxes, exampleProbability, ":", "Color", referenceColor, ...
-    "LineWidth", 1.5);
-lineMinimumHandle = plot(timeAxes, timeThresholds_s, ...
-    lineMinimumCurve, "-", ...
-    "Color", lineColor, "LineWidth", 2.0);
-ringMinimumHandle = plot(timeAxes, timeThresholds_s, ...
-    ringMinimumCurve, "-", ...
-    "Color", ringColor, "LineWidth", 2.0);
-plot(timeAxes, exampleTime_s, exampleProbability, "o", ...
-    "Color", lineColor, "MarkerSize", 10, "LineWidth", 1.7);
-plot(timeAxes, exampleTime_s, exampleProbability, "s", ...
-    "Color", ringColor, "MarkerSize", 7, "LineWidth", 1.7);
-text(timeAxes, exampleTime_s - 22.0, exampleProbability + 0.025, ...
-    "selected cell", "Interpreter", "tex", ...
-    "FontName", "Helvetica", "FontSize", 12.0, ...
-    "HorizontalAlignment", "left", "VerticalAlignment", "bottom");
-legend(timeAxes, [lineMinimumHandle, ringMinimumHandle], ...
-    {"Line", "Annular"}, "Location", "southwest", ...
-    "Box", "off", "FontName", "Helvetica", "FontSize", 11);
-xlim(timeAxes, [0, 60]);
-ylim(timeAxes, [0, 1]);
-xticks(timeAxes, [0, 30, 60]);
-yticks(timeAxes, [0, 0.5, 1]);
-xlabel(timeAxes, "First-warning time (s)");
-ylabel(timeAxes, "P_D(t)", "Interpreter", "tex");
-set(timeAxes, "FontName", "Helvetica", "FontSize", 12, ...
-    "LineWidth", 1.0, "Layer", "top");
-
-% Right: at fixed t*, invert P_D(t*;wD) to obtain the two minimum widths.
-widthAxes = nexttile(methodLayout, 2);
-hold(widthAxes, "on");
-grid(widthAxes, "on");
-box(widthAxes, "on");
-plot(widthAxes, lineSeries.WD_mrad, lineProbabilityVsWD, "-o", ...
-    "Color", lineColor, "LineWidth", 2, "MarkerSize", 2.8, ...
-    "MarkerFaceColor", lineColor);
-plot(widthAxes, ringSeries.WD_mrad, ringProbabilityVsWD, "-s", ...
-    "Color", ringColor, "LineWidth", 2, "MarkerSize", 2.8, ...
-    "MarkerFaceColor", ringColor);
-yline(widthAxes, exampleProbability, ":", "Color", referenceColor, ...
-    "LineWidth", 2);
-plot(widthAxes, [lineMinimum, lineMinimum], [0, exampleProbability], ":", ...
-    "Color", lineColor, "LineWidth", 1.3);
-plot(widthAxes, [ringMinimum, ringMinimum], [0, exampleProbability], ":", ...
-    "Color", ringColor, "LineWidth", 1.3);
-plot(widthAxes, lineMinimum, exampleProbability, "o", ...
-    "Color", lineColor, "MarkerFaceColor", "w", ...
-    "MarkerSize", 7.5, "LineWidth", 1.5);
-plot(widthAxes, ringMinimum, exampleProbability, "s", ...
-    "Color", ringColor, "MarkerFaceColor", "w", ...
-    "MarkerSize", 6.5, "LineWidth", 1.5);
-
-% % text(widthAxes, lineMinimum, exampleProbability + 0.035, ...
-%     compose("Line %.1f", lineMinimum), "Color", lineColor, ...
-%     "FontName", "Helvetica", "FontSize",12, ...
-%     "HorizontalAlignment", "center", "VerticalAlignment", "bottom");
-% text(widthAxes, ringMinimum, exampleProbability - 0.045, ...
-%     compose("Annular %.1f", ringMinimum), "Color", ringColor, ...
-%     "FontName", "Helvetica", "FontSize", 12, ...
-%     "HorizontalAlignment", "center", "VerticalAlignment", "top");
-ratioText = "\kappa=70/100=0.7"; 
-text(widthAxes, 0.95, 0.09, ratioText, ...
-    "Units", "normalized", "Interpreter", "tex", ...
-    "HorizontalAlignment", "right", "VerticalAlignment", "bottom", ...
-    "FontName", "Helvetica", "FontSize", 11, ...
-    "BackgroundColor", [1, 1, 1], ...
-    "EdgeColor", [0, 0, 0], "Margin", 2);
-
-maximumWidth = 1.8 * max(lineMinimum, ringMinimum);
-xlim(widthAxes, [0, maximumWidth]);
-ylim(widthAxes, [0, 1]);
-xticks(widthAxes, [0, round(ringMinimum), round(lineMinimum), ...
-    180]);
-xtickangle(widthAxes, 0);
-yticks(widthAxes, [0, 0.5, 1]);
-yticklabels(widthAxes, []);
-xlabel(widthAxes, "w_D (mrad)", "Interpreter", "tex");
-% ylabel(widthAxes, "P_D(t^*)", "Interpreter", "tex");
-
-set(widthAxes, "FontName", "Helvetica", "FontSize", 12, ...
-    "LineWidth", 1.0, "Layer", "top");
-end
-
-function probabilityCurve = probabilityCurveAtWidth(series, wD)
-%PROBABILITYCURVEATWIDTH Interpolate the monotone P_D values at one wD.
-numberOfTimes = size(series.PD, 1);
-probabilityCurve = nan(numberOfTimes, 1);
-for timeIndex = 1:numberOfTimes
-    monotoneProbability = cummax(series.PD(timeIndex, :).');
-    probabilityCurve(timeIndex) = interp1(series.WD_mrad(:), ...
-        monotoneProbability, wD, "linear", nan);
-end
-end
-
 function minimumWD = firstMonotoneCrossing(wD, probability, target)
 wD = wD(:);
 probability = cummax(probability(:));
@@ -416,14 +306,13 @@ end
 end
 
 function plotKappaHeatmap(ax, timeThresholds_s, targetProbabilities, ...
-        kappa, panelTitle)
+        kappa, panelTitle, kappaLimits)
 xEdges = cellEdges(timeThresholds_s);
 yEdges = 100 .* cellEdges(targetProbabilities);
 [xGrid, yGrid] = meshgrid(xEdges, yEdges);
 
-% Use true-color cell data so that the yellow tolerance band is assigned
-% exactly to 0.995 <= kappa <= 1.005, independently of colormap binning.
-kappaRGB = reshape(ratioColors(kappa(:)), [size(kappa), 3]);
+% True color reserves the compressed interval's midpoint for EXACTLY 1.
+kappaRGB = reshape(ratioColors(kappa(:), kappaLimits), [size(kappa), 3]);
 colorData = nan(size(kappa, 1) + 1, size(kappa, 2) + 1, 3);
 colorData(1:end-1, 1:end-1, :) = kappaRGB;
 colorData(end, 1:end-1, :) = kappaRGB(end, :, :);
@@ -437,21 +326,22 @@ alphaData(1:end-1, end) = alphaData(1:end-1, end-1);
 alphaData(end, end) = alphaData(end-1, end-1);
 
 surface(ax, xGrid, yGrid, zeros(size(xGrid)), colorData, ...
-    "FaceColor", "flat", "EdgeColor", [0.87, 0.87, 0.87], ...
-    "AlphaData", alphaData, "FaceAlpha", "flat", "LineWidth", 0.12);
+    "FaceColor", "flat", "EdgeColor", "none", ...
+    "AlphaData", alphaData, "FaceAlpha", "flat");
 view(ax, 2);
 set(ax, "YDir", "normal", "Color", [0.93, 0.93, 0.93]);
 xlim(ax, [0, 60]);
 ylim(ax, [0, 100]);
-xticks(ax, 0:10:60);
-yticks(ax, 0:20:100);
+xticks(ax, 0:15:60);
+yticks(ax, 0:25:100);
 xtickformat(ax, "%g");
 ytickformat(ax, "%g");
-xlabel(ax, "First-warning time (s)");
-ylabel(ax, "P_D(t) (%)", "Interpreter", "tex");
-title(ax, panelTitle, "Interpreter", "none", "FontWeight", "normal");
+xtickangle(ax, 0);
+title(ax, panelTitle, "Interpreter", "none", "FontWeight", "normal", ...
+    "FontSize", 14);
 box(ax, "on");
-set(ax, "FontName", "Helvetica", "FontSize", 12, "LineWidth", 1.2, ...
+set(ax, "FontName", "Helvetica", "FontSize", 14, "LineWidth", 1.2, ...
+    "TitleFontSizeMultiplier", 1, "LabelFontSizeMultiplier", 1, ...
     "Layer", "top");
 end
 
@@ -467,48 +357,67 @@ edges = [centers(1) - (midpoints(1) - centers(1)), ...
     midpoints, centers(end) + (centers(end) - midpoints(end))];
 end
 
-function colorMap = ratioColormap(numberOfColors)
-%RATIOCOLORMAP Jet-like blue/yellow/green map with a narrow yellow band.
+function colorMap = ratioColormap(numberOfColors, kappaLimits)
+%RATIOCOLORMAP Sample the same transfer function used by the heat maps.
 numberOfColors = max(9, round(numberOfColors));
 if mod(numberOfColors, 2) == 0
     numberOfColors = numberOfColors + 1;
 end
-ratioValues = linspace(0.5, 1.5, numberOfColors).';
-colorMap = ratioColors(ratioValues);
+centerPosition = ratioPosition(1, kappaLimits);
+positions = linspace(0, 1, numberOfColors).';
+below = positions <= centerPosition;
+ratioValues = zeros(size(positions));
+ratioValues(below) = kappaLimits(1) + positions(below) ./ ...
+    centerPosition .* (1 - kappaLimits(1));
+ratioValues(~below) = 1 + (positions(~below) - centerPosition) ./ ...
+    (1 - centerPosition) .* (kappaLimits(2) - 1);
+% Explicit equality avoids floating-point reconstruction at the divider.
+ratioValues(abs(positions - centerPosition) < eps) = 1;
+colorMap = ratioColors(ratioValues, kappaLimits);
 end
 
-function colors = ratioColors(ratioValues)
-%RATIOCOLORS Three-way color assignment with a yellow tolerance band.
+function positions = ratioPosition(ratioValues, kappaLimits)
+%RATIOPOSITION Independently linear normalization on either side of 1.
+positions = nan(size(ratioValues));
+centerPosition = 0.8;
+below = isfinite(ratioValues) & ratioValues <= 1;
+above = isfinite(ratioValues) & ratioValues > 1;
+positions(below) = centerPosition .* (ratioValues(below) - kappaLimits(1)) ./ ...
+    (1 - kappaLimits(1));
+positions(above) = centerPosition + (1 - centerPosition) .* (ratioValues(above) - 1) ./ ...
+    (kappaLimits(2) - 1);
+end
+
+function colors = ratioColors(ratioValues, kappaLimits)
+%RATIOCOLORS Muted jet with a short asymmetric transition compressed to 1.
+% Match WD_T_P_2D.m's saturation and brightness adjustments exactly.
+colorHSV = rgb2hsv(jet(1024));
+colorHSV(:, 2) = 0.55 * colorHSV(:, 2);
+colorHSV(:, 3) = 0.35 + 0.55 * colorHSV(:, 3);
+baseColorMap = hsv2rgb(colorHSV);
+% Normalized source-colormap positions, not physical wD or kappa values.
+% Retain [0, 0.60) below 1 (blue/cyan/green) and (0.70, 1] above 1
+% (orange/red): the lower side receives twice as much source-colormap range.
+% Compress only 10% of the source map; use its yellow midpoint at exact 1,
+% without assigning a finite kappa tolerance band.
+compressedInterval = [0.4, 0.65];
 ratioValues = ratioValues(:);
 colors = nan(numel(ratioValues), 3);
-
-yellowLower = 0.995;
-yellowUpper = 1.005;
-
-blueRatioAnchors = [0.50, 0.65, 0.78, 0.90, yellowLower];
-blueColorAnchors = [ ...
-      0,  30, 180; ... % saturated deep royal blue
-      0,  85, 255; ... % intense electric blue
-      0, 165, 255; ... % vivid azure
-      0, 220, 255; ... % brilliant cyan-blue
-     70, 245, 255] / 255; % bright saturated cyan at the band boundary
-
-greenRatioAnchors = [yellowUpper, 1.08, 1.18, 1.32, 1.50];
-greenColorAnchors = [ ...
-     65, 255,  75; ... % brilliant pure green at the band boundary
-      0, 235,  70; ... % intense vivid green
-      0, 205,  55; ... % saturated grass green
-      0, 160,  40; ... % strong medium green
-      0, 105,  30] / 255; % deep saturated forest green
-
-belowBand = ratioValues < yellowLower;
-yellowBand = ratioValues >= yellowLower & ratioValues <= yellowUpper;
-aboveBand = ratioValues > yellowUpper;
-
-colors(belowBand, :) = interp1(blueRatioAnchors, blueColorAnchors, ...
-    ratioValues(belowBand), "linear", "extrap");
-colors(yellowBand, :) = repmat([255, 240, 0] / 255, ...
-    nnz(yellowBand), 1);
-colors(aboveBand, :) = interp1(greenRatioAnchors, greenColorAnchors, ...
-    ratioValues(aboveBand), "linear", "extrap");
+positions = ratioPosition(ratioValues, kappaLimits);
+centerPosition = ratioPosition(1, kappaLimits);
+below = isfinite(ratioValues) & ratioValues < 1;
+above = isfinite(ratioValues) & ratioValues > 1;
+equal = ratioValues == 1;
+sourcePositions = nan(size(ratioValues));
+sourcePositions(below) = compressedInterval(1) .* ...
+    min(max(positions(below) ./ centerPosition, 0), 1);
+sourcePositions(above) = compressedInterval(2) + ...
+    (1 - compressedInterval(2)) .* ...
+    min(max((positions(above) - centerPosition) ./ ...
+    (1 - centerPosition), 0), 1);
+sourcePositions(equal) = mean(compressedInterval);
+valid = isfinite(sourcePositions);
+knots = linspace(0, 1, size(baseColorMap, 1));
+colors(valid, :) = interp1(knots, baseColorMap, ...
+    sourcePositions(valid), "linear");
 end

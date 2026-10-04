@@ -1,14 +1,35 @@
-function [detect, first_detect, first_encounter, effective_pulses] = MC_point_snr(fasan_D, ~, path1, beam_vec, path2, f, omiga, UP, UV, init_beam_idx, R)
+function [detect, first_detect, first_encounter, pulse_score, ...
+    post_detection_photons] = MC_point_snr( ...
+    fasan_D, ~, path1, beam_vec, path2, f, omiga, ...
+    UP, UV, init_beam_idx, R, N_KERNAL, max_step_index, window_mode)
 %MC_POINT_SNR  Monte Carlo detection judgment for a Gaussian point beam.
 %
 % fasan_D is the full divergence angle at the exp(-2) intensity contour.
 % The Gaussian half-angle width is therefore fasan_D/2.  The receiver FOV is
 % a hard circular cone with full angle 3*fasan_D.
 % first_encounter is the pulse-index difference from region entry (pulse 0)
-% to the first geometric-prefilter hit. effective_pulses counts positive-score
-% pulses in the shortest successful window at first_detect.
+% to the first geometric-prefilter hit. pulse_score follows the selected
+% window mode; post_detection_photons stores following pulses when requested.
 
-N_KERNAL = 100000;
+if nargin < 12 || isempty(N_KERNAL)
+    N_KERNAL = 100000;
+end
+validateattributes(N_KERNAL, {'numeric'}, ...
+    {'scalar', 'real', 'finite', 'integer', 'positive'}, ...
+    mfilename, 'N_KERNAL');
+if nargin < 13 || isempty(max_step_index)
+    max_step_index = inf;
+elseif isfinite(max_step_index)
+    validateattributes(max_step_index, {'numeric'}, ...
+        {'scalar', 'real', 'integer', 'nonnegative'}, ...
+        mfilename, 'max_step_index');
+end
+if nargin < 14 || isempty(window_mode)
+    window_mode = 'variable';
+end
+window_mode = validatestring(window_mode, {'variable', 'fixed'}, ...
+    mfilename, 'window_mode');
+collect_post_detection = nargout >= 5;
 
 SNR_THRESHOLD = 2;
 TARGET_W = 0.297;             % m, kept consistent with ring/line SNR code
@@ -25,11 +46,17 @@ if omiga <= 0
 end
 
 WINDOW_PULSES = max(1, ceil(f * (3 * fasan_D) / omiga));
+fasan_d = 0;
+POST_DETECTION_BASE_ANGLE = fasan_D + 3 * fasan_d;
 photon_model = get_point_photon_model(fasan_D, R);
 carry_sig = zeros(0, 1);
-carry_noise = zeros(0, 1);
+carry_backscatter = zeros(0, 1);
 carry_step = zeros(0, 1);
 first_encounter = nan;
+post_detection_photons = empty_detection_window_photons();
+capture_active = false;
+first_post_step = nan;
+last_post_step = nan;
 
 %% One complete beam cycle used by the original code
 Beam_all = [beam_vec; path2; flipud(beam_vec); path1];
@@ -51,12 +78,26 @@ if initial_candidate
     illum0 = point_gaussian_target_factor(dtheta0, UP_norm, ...
         TARGET_W, GAUSSIAN_HALF_ANGLE, FOV_HALF_ANGLE);
 end
-noise0 = lookup_point_noise(photon_model, UP_norm);
+[~, backscatter0] = lookup_point_noise(photon_model, UP_norm);
 sig0 = calc_point_signal_photons(photon_model, UP_norm, illum0);
-[detect, first_detect, effective_pulses, carry_sig, carry_noise, carry_step] = ...
-    append_and_check_window(carry_sig, carry_noise, carry_step, ...
-    sig0, noise0, 0, WINDOW_PULSES, SNR_THRESHOLD);
+[detect, first_detect, pulse_score, carry_sig, carry_backscatter, carry_step] = ...
+    append_and_check_photon_window( ...
+    carry_sig, carry_backscatter, carry_step, sig0, backscatter0, 0, ...
+    photon_model.N_bg, photon_model.N_dark, WINDOW_PULSES, SNR_THRESHOLD, ...
+    window_mode);
 if detect
+    if ~collect_post_detection
+        return;
+    end
+    post_pulse_count = post_detection_pulse_count( ...
+        f, POST_DETECTION_BASE_ANGLE, omiga, UP_norm, norm(UV));
+    first_post_step = first_detect + 1;
+    last_post_step = first_detect + post_pulse_count;
+    capture_active = true;
+end
+
+% Optional finite-horizon mode: step 0 above is the initial pulse.
+if max_step_index == 0
     return;
 end
 
@@ -79,6 +120,11 @@ while true
     else
         block_len = exit_idx - 1;
     end
+    step_offset = (block_id - 1) * N_KERNAL;
+    remaining_steps = max_step_index - step_offset;
+    block_len = min(block_len, remaining_steps);
+    reached_step_limit = isfinite(max_step_index) && ...
+        (step_offset + block_len >= max_step_index);
 
     if block_len > 0
         P_block = P_now(1:block_len, :);
@@ -102,22 +148,56 @@ while true
                 GAUSSIAN_HALF_ANGLE, FOV_HALF_ANGLE);
         end
 
-        noise_arr = lookup_point_noise(photon_model, z_block);
+        [~, backscatter_arr] = lookup_point_noise(photon_model, z_block);
         sig_arr = zeros(block_len, 1);
         if ~isempty(hit_idx)
             sig_arr(hit_idx) = calc_point_signal_photons( ...
                 photon_model, z_block(hit_idx), illum_arr(hit_idx));
         end
 
-        [detect, first_detect, effective_pulses, carry_sig, carry_noise, carry_step] = ...
-            append_and_check_window(carry_sig, carry_noise, carry_step, ...
-            sig_arr, noise_arr, step_arr, WINDOW_PULSES, SNR_THRESHOLD);
-        if detect
-            return;
+        if capture_active
+            [post_detection_photons, capture_complete] = ...
+                append_post_detection_photons( ...
+                post_detection_photons, sig_arr, backscatter_arr, step_arr, ...
+                first_post_step, last_post_step, ...
+                photon_model.N_bg, photon_model.N_dark);
+            if capture_complete
+                return;
+            end
+        else
+            [detect, first_detect, pulse_score, carry_sig, ...
+                carry_backscatter, carry_step] = ...
+                append_and_check_photon_window( ...
+                carry_sig, carry_backscatter, carry_step, ...
+                sig_arr, backscatter_arr, step_arr, ...
+                photon_model.N_bg, photon_model.N_dark, ...
+                WINDOW_PULSES, SNR_THRESHOLD, window_mode);
+            if detect
+                if ~collect_post_detection
+                    return;
+                end
+                detection_pos = find(step_arr == first_detect, 1, 'first');
+                detection_range = z_block(detection_pos);
+                post_pulse_count = post_detection_pulse_count( ...
+                    f, POST_DETECTION_BASE_ANGLE, omiga, ...
+                    detection_range, norm(UV));
+                first_post_step = first_detect + 1;
+                last_post_step = first_detect + post_pulse_count;
+                capture_active = true;
+
+                [post_detection_photons, capture_complete] = ...
+                    append_post_detection_photons( ...
+                    post_detection_photons, sig_arr, backscatter_arr, ...
+                    step_arr, first_post_step, last_post_step, ...
+                    photon_model.N_bg, photon_model.N_dark);
+                if capture_complete
+                    return;
+                end
+            end
         end
     end
 
-    if ~isempty(exit_idx)
+    if ~isempty(exit_idx) || reached_step_limit
         break;
     end
 
@@ -204,14 +284,15 @@ cached_key = key;
 cached_model = model;
 end
 
-function N_noise = lookup_point_noise(model, z)
+function [N_noise, N_bs] = lookup_point_noise(model, z)
 % Nearest-neighbor lookup on the 0.5 m deterministic backscatter table.
 
 z = z(:);
 idx = round(z ./ model.z_step) + 1;
 idx(~isfinite(idx)) = 1;
 idx = max(1, min(numel(model.N_bs_lut), idx));
-N_noise = model.N_bs_lut(idx) + model.N_bg + model.N_dark;
+N_bs = model.N_bs_lut(idx);
+N_noise = N_bs + model.N_bg + model.N_dark;
 end
 
 function N_sig = calc_point_signal_photons(model, z, illumination_factor)
@@ -233,76 +314,6 @@ N_sig(valid) = model.N_tx .* ...
     (model.A_target .* illumination_factor(valid) ./ beam_area) .* ...
     model.rho .* (model.A_rx ./ (pi .* z(valid).^2)) .* ...
     T2_target .* model.eta_sys;
-end
-
-function [detect, first_detect, effective_pulses, carry_sig, carry_noise, carry_step] = ...
-    append_and_check_window(carry_sig, carry_noise, carry_step, ...
-    sig_arr, noise_arr, step_arr, window_pulses, threshold)
-
-detect = 0;
-first_detect = nan;
-effective_pulses = nan;
-
-sig_arr = sig_arr(:);
-noise_arr = noise_arr(:);
-step_arr = step_arr(:);
-if isempty(sig_arr)
-    return;
-end
-
-sig_arr(~isfinite(sig_arr)) = 0;
-noise_arr(~isfinite(noise_arr)) = 0;
-
-n_carry = numel(carry_sig);
-all_sig = [carry_sig; sig_arr];
-all_noise = [carry_noise; noise_arr];
-all_step = [carry_step; step_arr];
-n_all = numel(all_sig);
-
-signal_tail_pos = n_carry + find(sig_arr > 0);
-
-if ~isempty(signal_tail_pos)
-    tail_pos = signal_tail_pos(:);
-    max_len = min(window_pulses, n_all);
-    len_vec = 1:max_len;
-    start_pos = tail_pos - len_vec + 1;
-    valid_len = start_pos >= 1;
-    start_pos(~valid_len) = 1;
-
-    pulse_var = all_sig + all_noise;
-    pulse_score = zeros(size(all_sig));
-    score_valid = all_sig > 0 & pulse_var > 0 & isfinite(pulse_var);
-    pulse_score(score_valid) = all_sig(score_valid).^2 ./ ...
-        pulse_var(score_valid);
-    cs_score = [0; cumsum(pulse_score)];
-
-    win_score = cs_score(tail_pos + 1) - cs_score(start_pos);
-    win_snr = sqrt(win_score);
-    win_snr(~valid_len | win_score <= 0 | ~isfinite(win_snr)) = -inf;
-
-    hit_matrix = win_snr >= threshold;
-    ok = find(any(hit_matrix, 2), 1, 'first');
-    if ~isempty(ok)
-        successful_len = find(hit_matrix(ok, :), 1, 'first');
-        successful_start = start_pos(ok, successful_len);
-        detect = 1;
-        first_detect = all_step(tail_pos(ok));
-        effective_pulses = nnz( ...
-            pulse_score(successful_start:tail_pos(ok)) > 0);
-        return;
-    end
-end
-
-n_keep = min(window_pulses - 1, n_all);
-if n_keep > 0
-    carry_sig = all_sig(end - n_keep + 1:end);
-    carry_noise = all_noise(end - n_keep + 1:end);
-    carry_step = all_step(end - n_keep + 1:end);
-else
-    carry_sig = zeros(0, 1);
-    carry_noise = zeros(0, 1);
-    carry_step = zeros(0, 1);
-end
 end
 
 function seg = cut_loop_simple_anyk(a1, a2, a3, k, m)

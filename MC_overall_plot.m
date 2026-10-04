@@ -8,9 +8,9 @@ if strlength(scriptDir) == 0
     scriptDir = pwd;
 end
 
-dataRoot = fileparts(fileparts(scriptDir));
+dataRoot='G:\一套完整的MC数据';
 mcResultDir = fullfile(dataRoot, "MC_RESULTS");
-roiResultDir = fullfile(scriptDir, "MC_ROI_RESULTS_SNR_NEW");
+roiResultDir = fullfile(dataRoot, "MC_ROI_RESULTS_SNR_NEW");
 
 if ~isfolder(mcResultDir)
     error("MC result folder not found: %s", mcResultDir);
@@ -23,10 +23,10 @@ fasanDMrad = 5:5:400;
 fasanSmallDMrad = 1;
 mcColumnIndex = 1;
 beamTypes = ["POINT", "LINE", "RING"];
-beamLabels = ["spot", "line", "annular"];
+beamLabels = ["Spot", "Line", "Annular"];
 trackTypes = ["RA", "SP"];
-columnTitles = ["MC", "ROI_RA", "ROI_SP"];
-markers = ["^", "s", "o"];
+columnTitles = ["ROE", "ROI-RA", "ROI-SP"];
+markers = [" ", " ", " "];
 colors = [ ...
     0.4660, 0.6740, 0.1880; ...
     0.0000, 0.4470, 0.7410; ...
@@ -47,7 +47,7 @@ probability = cat(2, reshape(mcProbability, 3, 1, []), roiProbability);
 firstWarningTime = cat(2, ...
     reshape(mcFirstWarningTime, 3, 1, []), roiFirstWarningTime);
 
-figureHandle = figure("Color", "w", "Position", [100, 100, 1200, 650]);
+figureHandle = figure("Color", "w", "Position", [100, 100, 800, 470]);
 layout = tiledlayout(figureHandle, 2, 3, ...
     "TileSpacing", "compact", "Padding", "compact");
 
@@ -64,7 +64,7 @@ for columnIndex = 1:numberOfColumns
         yData = 100*reshape( ...
             probability(beamIndex, columnIndex, :), 1, []);
         lineHandle = plot(probabilityAxes(columnIndex), fasanDMrad, yData, ...
-            "-" + markers(beamIndex), "LineWidth", 1.8, ...
+            "-" + markers(beamIndex), "LineWidth", 3, ...
             "MarkerSize", 4, "Color", colors(beamIndex, :), ...
             "DisplayName", beamLabels(beamIndex));
         if columnIndex == 1
@@ -72,7 +72,7 @@ for columnIndex = 1:numberOfColumns
         end
     end
     formatProbabilityAxes(probabilityAxes(columnIndex), ...
-        columnTitles(columnIndex), columnIndex == 1);
+        columnTitles(columnIndex), columnIndex);
 
     timeAxes(columnIndex) = nexttile(layout, numberOfColumns + columnIndex);
     hold(timeAxes(columnIndex), "on");
@@ -80,22 +80,30 @@ for columnIndex = 1:numberOfColumns
         yData = reshape( ...
             firstWarningTime(beamIndex, columnIndex, :), 1, []);
         plot(timeAxes(columnIndex), fasanDMrad, yData, ...
-            "-" + markers(beamIndex), "LineWidth", 1.8, ...
+            "-" + markers(beamIndex), "LineWidth", 3, ...
             "MarkerSize", 4, "Color", colors(beamIndex, :), ...
             "DisplayName", beamLabels(beamIndex));
     end
-    formatTimeAxes(timeAxes(columnIndex), columnIndex == 1);
+    formatTimeAxes(timeAxes(columnIndex), columnIndex);
 end
 
-linkaxes(probabilityAxes, "xy");
-linkaxes(timeAxes, "xy");
+linkaxes(probabilityAxes, "x");
+linkaxes(timeAxes, "x");
+xlabel(layout, "{\it\theta}_{\rmD} (mrad)", "Interpreter", "tex", ...
+    "FontName", "Helvetica", "FontSize", 14);
 
 legendHandle = legend(probabilityAxes(1), legendLines, beamLabels, ...
-    "Location", "best", "FontName", "Helvetica", "FontSize", 13);
+    "Location", "best", "FontName", "Helvetica", "FontSize", 14);
 legendHandle.Layout.Tile = "north";
 legendHandle.NumColumns = numberOfBeams;
 legendHandle.Box = "off";
 legendHandle.ItemTokenSize = [50, 18];
+
+% Disable automatic title/label scaling and use one font size throughout.
+set([probabilityAxes, timeAxes], ...
+    "TitleFontSizeMultiplier", 1, "LabelFontSizeMultiplier", 1);
+set(findall(figureHandle, "-property", "FontUnits"), "FontUnits", "points");
+set(findall(figureHandle, "-property", "FontSize"), "FontSize", 14);
 
 outputPng = fullfile(scriptDir, "MC_overall_plot.png");
 outputFig = fullfile(scriptDir, "MC_overall_plot.fig");
@@ -285,39 +293,44 @@ function yFilled = fillMissingByInterpolation(x, yRaw, dataName)
     yFilled = reshape(yFilled, originalSize);
 end
 
-function formatProbabilityAxes(axesHandle, panelTitle, showYLabels)
+function formatProbabilityAxes(axesHandle, panelTitle, columnIndex)
     grid(axesHandle, "on");
     box(axesHandle, "on");
     title(axesHandle, panelTitle, "Interpreter", "none", ...
-        "FontName", "Helvetica", "FontSize", 13, "FontWeight", "normal");
+        "FontName", "Helvetica", "FontSize", 14, "FontWeight", "normal");
     xlabel(axesHandle, "");
-    xticks(axesHandle, 0:100:500);
-    yticks(axesHandle, 0:25:100);
-    ylim(axesHandle, [0, 100]);
-    if showYLabels
-        ylabel(axesHandle, "{\it P}_{\rmdetect} (%)", "Interpreter", "tex");
+    xticks(axesHandle, 0:100:400);
+    xticklabels(axesHandle, {});
+    xtickangle(axesHandle, 0);
+    if columnIndex == 1
+        yticks(axesHandle, 0:25:100);
     else
-        ylabel(axesHandle, "");
+        yticks(axesHandle, [0, 25, 50, 75, 100]);
     end
-    set(axesHandle, "FontName", "Helvetica", "FontSize", 13, ...
+    ylim(axesHandle, [0, 100]);
+    ylabel(axesHandle, "");
+    set(axesHandle, "FontName", "Helvetica", "FontSize", 14, ...
         "LineWidth", 2, "XScale", "linear");
     set([axesHandle.XLabel, axesHandle.YLabel], ...
-        "FontName", "Helvetica", "FontSize", 13);
+        "FontName", "Helvetica", "FontSize", 14);
 end
 
-function formatTimeAxes(axesHandle, showYLabels)
+function formatTimeAxes(axesHandle, columnIndex)
     grid(axesHandle, "on");
     box(axesHandle, "on");
-    xlabel(axesHandle, "{\it w}_{\rmD} (mrad)", "Interpreter", "tex");
+    xlabel(axesHandle, "");
     xticks(axesHandle, 0:100:500);
-    if showYLabels
-        ylabel(axesHandle, "{\it t}_{\rm warn} (s)", ...
-            "Interpreter", "tex");
+    xtickangle(axesHandle, 0);
+    if columnIndex == 1
+        yticks(axesHandle, [0, 15, 30, 45, 60]);
+        ylim(axesHandle, [0, 60]);
     else
-        ylabel(axesHandle, "");
+        yticks(axesHandle, [0, 5, 10, 15, 20]);
+        ylim(axesHandle, [0, 20]);
     end
-    set(axesHandle, "FontName", "Helvetica", "FontSize", 13, ...
+    ylabel(axesHandle, "");
+    set(axesHandle, "FontName", "Helvetica", "FontSize", 14, ...
         "LineWidth", 2, "XScale", "linear");
     set([axesHandle.XLabel, axesHandle.YLabel], ...
-        "FontName", "Helvetica", "FontSize", 13);
+        "FontName", "Helvetica", "FontSize", 14);
 end

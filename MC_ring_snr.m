@@ -1,4 +1,7 @@
-function [detect, first_detect, first_encounter, effective_pulses] = MC_ring_snr(fasan_D, fasan_d, path1, beam_vec, path2, f, omiga, UP, UV, init_beam_idx, R)
+function [detect, first_detect, first_encounter, pulse_score, ...
+    post_detection_photons] = MC_ring_snr( ...
+    fasan_D, fasan_d, path1, beam_vec, path2, f, omiga, ...
+    UP, UV, init_beam_idx, R, N_KERNAL, max_step_index, window_mode, physics)
 %MC_RING  Monte Carlo detection judgment for annular beam.
 %
 % The annular beam uses a radial Gaussian profile centered at fasan_D/2.
@@ -11,7 +14,7 @@ function [detect, first_detect, first_encounter, effective_pulses] = MC_ring_snr
 %   For every emitted pulse, compute N_sig and N_noise at the target range.
 %   Missed pulses have N_sig = 0 and still contribute N_noise.  A causal
 %   sliding window with M = ceil(f * fasan_D / omiga) pulses is evaluated as
-%       D = sum(N_sig) / sqrt(sum(N_sig) + sum(N_noise)).
+%       D = sqrt(sum(N_sig.^2 ./ (N_sig + N_noise))).
 %   Detection is accepted when D >= 2, and first_detect is the tail pulse
 %   index of the first successful window.
 %
@@ -19,10 +22,36 @@ function [detect, first_detect, first_encounter, effective_pulses] = MC_ring_snr
 % first_encounter is the pulse-index difference between the first pulse that
 % passes the geometric prefilter and entry into the detection region. The
 % current Monte Carlo trajectories enter at pulse 0.
-% effective_pulses is the number of positive-score pulses in the shortest
-% successful window at first_detect.
+% In variable mode, pulse_score stores the shortest successful causal
+% window. In fixed mode, it stores the single startup-or-M-length window.
+% When requested, post_detection_photons stores the following pulse sequence.
 
-N_KERNAL = 100000;
+if nargin < 12 || isempty(N_KERNAL)
+    N_KERNAL = 25000;
+end
+validateattributes(N_KERNAL, {'numeric'}, ...
+    {'scalar', 'real', 'finite', 'integer', 'positive'}, ...
+    mfilename, 'N_KERNAL');
+if nargin < 13 || isempty(max_step_index)
+    max_step_index = inf;
+elseif isfinite(max_step_index)
+    validateattributes(max_step_index, {'numeric'}, ...
+        {'scalar', 'real', 'integer', 'nonnegative'}, ...
+        mfilename, 'max_step_index');
+end
+if nargin < 14 || isempty(window_mode)
+    window_mode = 'variable';
+end
+window_mode = validatestring(window_mode, {'variable', 'fixed'}, ...
+    mfilename, 'window_mode');
+collect_post_detection = nargout >= 5;
+% Optional [pulse energy (J), reflectivity, alpha (1/m), beta (1/(m sr))].
+if nargin < 15 || isempty(physics)
+    physics = [150e-6, 0.5, 1.5e-5, 0.3e-6];
+end
+validateattributes(physics, {'double'}, ...
+    {'vector','numel',4,'real','finite','positive'}, mfilename, 'physics');
+assert(physics(2) <= 1, 'MC_ring_snr:Reflectivity', 'Reflectivity must be <= 1.');
 
 SNR_THRESHOLD = 2;
 TARGET_W = 0.297;                 % m, kept consistent with MC_single_pulse_snr
@@ -40,11 +69,16 @@ if omiga <= 0
 end
 
 WINDOW_PULSES = max(1, ceil(f * fasan_D / omiga));
-photon_model = get_ring_photon_model(fasan_D, fasan_d, R);
+POST_DETECTION_BASE_ANGLE = fasan_D + 3 * fasan_d;
+photon_model = get_ring_photon_model(fasan_D, fasan_d, R, physics);
 carry_sig = zeros(0, 1);
-carry_noise = zeros(0, 1);
+carry_backscatter = zeros(0, 1);
 carry_step = zeros(0, 1);
 first_encounter = nan;
+post_detection_photons = empty_detection_window_photons();
+capture_active = false;
+first_post_step = nan;
+last_post_step = nan;
 
 %% One complete beam cycle used by the original code
 Beam_all = [beam_vec; path2; flipud(beam_vec); path1];
@@ -65,12 +99,26 @@ if initial_candidate
     illum0 = ring_gaussian_target_factor(dtheta0, UP_norm, ...
         TARGET_W, RING_RADIUS, RING_HALF_WIDTH);
 end
-noise0 = lookup_ring_noise(photon_model, UP_norm);
+[~, backscatter0] = lookup_ring_noise(photon_model, UP_norm);
 sig0 = calc_ring_signal_photons(photon_model, UP_norm, illum0);
-[detect, first_detect, effective_pulses, carry_sig, carry_noise, carry_step] = ...
-    append_and_check_window(carry_sig, carry_noise, carry_step, ...
-    sig0, noise0, 0, WINDOW_PULSES, SNR_THRESHOLD);
+[detect, first_detect, pulse_score, carry_sig, carry_backscatter, carry_step] = ...
+    append_and_check_photon_window( ...
+    carry_sig, carry_backscatter, carry_step, sig0, backscatter0, 0, ...
+    photon_model.N_bg, photon_model.N_dark, WINDOW_PULSES, SNR_THRESHOLD, ...
+    window_mode);
 if detect
+    if ~collect_post_detection
+        return;
+    end
+    post_pulse_count = post_detection_pulse_count( ...
+        f, POST_DETECTION_BASE_ANGLE, omiga, UP_norm, norm(UV));
+    first_post_step = first_detect + 1;
+    last_post_step = first_detect + post_pulse_count;
+    capture_active = true;
+end
+
+% Optional finite-horizon mode: step 0 above is the initial pulse.
+if max_step_index == 0
     return;
 end
 
@@ -93,6 +141,11 @@ while true
     else
         block_len = exit_idx - 1;
     end
+    step_offset = (block_id - 1) * N_KERNAL;
+    remaining_steps = max_step_index - step_offset;
+    block_len = min(block_len, remaining_steps);
+    reached_step_limit = isfinite(max_step_index) && ...
+        (step_offset + block_len >= max_step_index);
 
     if block_len > 0
         P_block = P_now(1:block_len, :);
@@ -115,25 +168,58 @@ while true
                 TARGET_W, RING_RADIUS, RING_HALF_WIDTH);
         end
 
-        % The window rule below intentionally uses sig/noise sums, not a
-        % sqrt(M) equal-variance approximation on per-pulse SNR values.
-        noise_arr = lookup_ring_noise(photon_model, z_block);
+        % Keep the executed weighted per-pulse score criterion unchanged.
+        [~, backscatter_arr] = lookup_ring_noise(photon_model, z_block);
         sig_arr = zeros(block_len, 1);
         if ~isempty(hit_idx)
             sig_arr(hit_idx) = calc_ring_signal_photons( ...
                 photon_model, z_block(hit_idx), illum_arr(hit_idx));
         end
 
-        [detect, first_detect, effective_pulses, carry_sig, carry_noise, carry_step] = ...
-            append_and_check_window(carry_sig, carry_noise, carry_step, ...
-            sig_arr, noise_arr, step_arr, WINDOW_PULSES, SNR_THRESHOLD);
-        if detect
-            return;
+        if capture_active
+            [post_detection_photons, capture_complete] = ...
+                append_post_detection_photons( ...
+                post_detection_photons, sig_arr, backscatter_arr, step_arr, ...
+                first_post_step, last_post_step, ...
+                photon_model.N_bg, photon_model.N_dark);
+            if capture_complete
+                return;
+            end
+        else
+            [detect, first_detect, pulse_score, carry_sig, ...
+                carry_backscatter, carry_step] = ...
+                append_and_check_photon_window( ...
+                carry_sig, carry_backscatter, carry_step, ...
+                sig_arr, backscatter_arr, step_arr, ...
+                photon_model.N_bg, photon_model.N_dark, ...
+                WINDOW_PULSES, SNR_THRESHOLD, window_mode);
+            if detect
+                if ~collect_post_detection
+                    return;
+                end
+                detection_pos = find(step_arr == first_detect, 1, 'first');
+                detection_range = z_block(detection_pos);
+                post_pulse_count = post_detection_pulse_count( ...
+                    f, POST_DETECTION_BASE_ANGLE, omiga, ...
+                    detection_range, norm(UV));
+                first_post_step = first_detect + 1;
+                last_post_step = first_detect + post_pulse_count;
+                capture_active = true;
+
+                [post_detection_photons, capture_complete] = ...
+                    append_post_detection_photons( ...
+                    post_detection_photons, sig_arr, backscatter_arr, ...
+                    step_arr, first_post_step, last_post_step, ...
+                    photon_model.N_bg, photon_model.N_dark);
+                if capture_complete
+                    return;
+                end
+            end
         end
     end
 
     % Original termination condition: target has left the detection region.
-    if ~isempty(exit_idx)
+    if ~isempty(exit_idx) || reached_step_limit
         break;
     end
 
@@ -147,7 +233,7 @@ while true
 end
 end
 
-function model = get_ring_photon_model(fasan_D, fasan_d, R)
+function model = get_ring_photon_model(fasan_D, fasan_d, R, physics)
 % Build and cache deterministic photon-count quantities for annular beams.
 % The cache avoids recomputing range-gate backscatter integrals for every
 % Monte Carlo trajectory.  In a parallel pool, each worker keeps its own
@@ -155,7 +241,7 @@ function model = get_ring_photon_model(fasan_D, fasan_d, R)
 
 persistent cached_model cached_key
 
-key = sprintf('%.17g_%.17g_%.17g', fasan_D, fasan_d, R);
+key = sprintf('%.17g_', [fasan_D, fasan_d, R, physics(:).']);
 if ~isempty(cached_model) && strcmp(cached_key, key)
     model = cached_model;
     return;
@@ -167,15 +253,15 @@ c = 299792458;                    % m/s
 
 %% System parameters, identical to MC_single_pulse_snr.m
 lambda = 1550e-9;                 % m
-E_pulse = 150e-6;                 % J
+E_pulse = physics(1);             % J
 D_rx = 0.0508;                    % m
 A_rx = pi * (D_rx/2)^2;           % m^2
 eta_opt = 0.80;
 eta_det = 0.80;
 eta_sys = eta_opt * eta_det;
 tau_gate = 50e-9;                 % s
-alpha = 1.5e-5;                   % 1/m
-beta = 0.3e-6;                    % 1/(m*sr)
+alpha = physics(3);               % 1/m
+beta = physics(4);                % 1/(m*sr)
 L_sky_nm = 5e-9;                  % W/(m^2*sr*nm)
 delta_lambda_nm = 10.0;           % nm
 dark_count_rate = 400;            % counts/s
@@ -183,7 +269,7 @@ dark_count_rate = 400;            % counts/s
 %% Target parameters, identical to MC_single_pulse_snr.m
 target_w = 0.297;                 % m
 A_target = target_w * target_w;   % m^2
-rho = 0.5;
+rho = physics(2);
 
 E_photon = h * c / lambda;
 N_tx = E_pulse / E_photon;
@@ -228,14 +314,15 @@ cached_key = key;
 cached_model = model;
 end
 
-function N_noise = lookup_ring_noise(model, z)
+function [N_noise, N_bs] = lookup_ring_noise(model, z)
 % Nearest-neighbor lookup on the 0.5 m deterministic backscatter table.
 
 z = z(:);
 idx = round(z ./ model.z_step) + 1;
 idx(~isfinite(idx)) = 1;
 idx = max(1, min(numel(model.N_bs_lut), idx));
-N_noise = model.N_bs_lut(idx) + model.N_bg + model.N_dark;
+N_bs = model.N_bs_lut(idx);
+N_noise = N_bs + model.N_bg + model.N_dark;
 end
 
 function N_sig = calc_ring_signal_photons(model, z, illumination_factor)
@@ -257,85 +344,6 @@ N_sig(valid) = model.N_tx .* ...
     (model.A_target .* illumination_factor(valid) ./ beam_area) .* ...
     model.rho .* (model.A_rx ./ (pi .* z(valid).^2)) .* ...
     T2_target .* model.eta_sys;
-end
-
-function [detect, first_detect, effective_pulses, carry_sig, carry_noise, carry_step] = ...
-    append_and_check_window(carry_sig, carry_noise, carry_step, ...
-    sig_arr, noise_arr, step_arr, window_pulses, threshold)
-
-detect = 0;
-first_detect = nan;
-effective_pulses = nan;
-
-sig_arr = sig_arr(:);
-noise_arr = noise_arr(:);
-step_arr = step_arr(:);
-if isempty(sig_arr)
-    return;
-end
-
-sig_arr(~isfinite(sig_arr)) = 0;
-noise_arr(~isfinite(noise_arr)) = 0;
-
-n_carry = numel(carry_sig);
-all_sig = [carry_sig; sig_arr];
-all_noise = [carry_noise; noise_arr];
-all_step = [carry_step; step_arr];
-n_all = numel(all_sig);
-
-% A tail pulse with no target signal only adds noise.  It cannot create a
-% new higher-SNR detection that was not already available at the previous
-% signal-bearing pulse.  Therefore evaluate variable-length windows only at
-% newly appended pulses whose N_sig is positive, instead of building a
-% block_len-by-M matrix for every emitted pulse.
-signal_tail_pos = n_carry + find(sig_arr > 0);
-
-if ~isempty(signal_tail_pos)
-    % Variable-length causal windows.  Rows are newly appended signal-bearing
-    % tail pulses; columns are window lengths L = 1...M.  A pulse is accepted
-    % as soon as any length up to M reaches the SNR threshold.  For the same
-    % tail pulse, shorter windows are implicitly preferred by the column order.
-    tail_pos = signal_tail_pos(:);
-    max_len = min(window_pulses, n_all);
-    len_vec = 1:max_len;
-    start_pos = tail_pos - len_vec + 1;
-    valid_len = start_pos >= 1;
-    start_pos(~valid_len) = 1;
-
-    pulse_var = all_sig + all_noise;
-    pulse_score = zeros(size(all_sig));
-    score_valid = all_sig > 0 & pulse_var > 0 & isfinite(pulse_var);
-    pulse_score(score_valid) = all_sig(score_valid).^2 ./ ...
-        pulse_var(score_valid);
-    cs_score = [0; cumsum(pulse_score)];
-
-    win_score = cs_score(tail_pos + 1) - cs_score(start_pos);
-    win_snr = sqrt(win_score);
-    win_snr(~valid_len | win_score <= 0 | ~isfinite(win_snr)) = -inf;
-
-    hit_matrix = win_snr >= threshold;
-    ok = find(any(hit_matrix, 2), 1, 'first');
-    if ~isempty(ok)
-        successful_len = find(hit_matrix(ok, :), 1, 'first');
-        successful_start = start_pos(ok, successful_len);
-        detect = 1;
-        first_detect = all_step(tail_pos(ok));
-        effective_pulses = nnz( ...
-            pulse_score(successful_start:tail_pos(ok)) > 0);
-        return;
-    end
-end
-
-n_keep = min(window_pulses - 1, n_all);
-if n_keep > 0
-    carry_sig = all_sig(end - n_keep + 1:end);
-    carry_noise = all_noise(end - n_keep + 1:end);
-    carry_step = all_step(end - n_keep + 1:end);
-else
-    carry_sig = zeros(0, 1);
-    carry_noise = zeros(0, 1);
-    carry_step = zeros(0, 1);
-end
 end
 
 function seg = cut_loop_simple_anyk(a1, a2, a3, k, m)

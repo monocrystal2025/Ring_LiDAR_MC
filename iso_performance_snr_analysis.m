@@ -278,16 +278,27 @@ column = 1;
 
 annularDetected = annularData.detect_R(:, column) ~= 0;
 lineDetected = lineData.detect_L(:, column) ~= 0;
-annularEffective = annularData.effective_pulses_R(annularDetected, column);
-lineEffective = lineData.effective_pulses_L(lineDetected, column);
-annularEffective = annularEffective(isfinite(annularEffective));
-lineEffective = lineEffective(isfinite(lineEffective));
+annularEffective = extract_effective_pulse_counts( ...
+    annularData.effective_pulses_R(annularDetected, column));
+lineEffective = extract_effective_pulse_counts( ...
+    lineData.effective_pulses_L(lineDetected, column));
 
 mc = struct;
 mc.annular = summarize_mc(annularDetected, ...
     annularData.first_time_R(:, column), annularEffective, annularFile);
 mc.line = summarize_mc(lineDetected, ...
     lineData.first_time_L(:, column), lineEffective, lineFile);
+end
+
+function counts = extract_effective_pulse_counts(values)
+% Support both legacy numeric counts and photon-window structures.
+
+if isnumeric(values)
+    counts = values(:);
+else
+    counts = arrayfun(@(value) nnz(value.signal_photons > 0), values(:));
+end
+counts = counts(isfinite(counts));
 end
 
 function summary = summarize_mc(detected, warningTime, effectivePulses, sourceFile)

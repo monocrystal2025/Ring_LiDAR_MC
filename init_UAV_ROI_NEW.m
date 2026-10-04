@@ -21,7 +21,9 @@ v_max = max(v_max, v_min);
 
 alpha = deg2rad(jiaodu);
 theta = 2 * pi * rand(N, 1);
-slant_range = 100 + (R - 100) * rand(N, 1);
+minimum_slant_range = 100;
+slant_range = sqrt(minimum_slant_range^2 + ...
+    (R^2 - minimum_slant_range^2) * rand(N, 1));
 
 P = [ ...
     slant_range .* sin(alpha) .* cos(theta), ...

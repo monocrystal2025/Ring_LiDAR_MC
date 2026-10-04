@@ -1,21 +1,31 @@
-function [detect, first_detect, first_encounter, effective_pulses] = ...
+function [detect, first_detect, first_encounter, pulse_score] = ...
     MC_line_RA_snr_NEW(fasan_D, fasan_d, ...
-    line_scan, f, omiga, UP, UV, init_beam_idx, R, jiaodu)
+    line_scan, f, omiga, UP, UV, init_beam_idx, R, jiaodu, window_mode, mc_block_size)
 %MC_LINE_RA_SNR_NEW Line-beam detection in a cone ROI.
 
-[detect, first_detect, first_encounter, effective_pulses] = ...
+if nargin < 11 || isempty(window_mode)
+    window_mode = 'variable';
+end
+if nargin < 12 || isempty(mc_block_size)
+    mc_block_size = 100000;
+end
+validateattributes(mc_block_size, {'numeric'}, ...
+    {'scalar', 'real', 'finite', 'integer', 'positive'}, ...
+    mfilename, 'mc_block_size');
+[detect, first_detect, first_encounter, pulse_score] = ...
     cone_line_snr_core(fasan_D, fasan_d, ...
-    line_scan, f, omiga, UP, UV, init_beam_idx, R, jiaodu);
+    line_scan, f, omiga, UP, UV, init_beam_idx, R, jiaodu, window_mode, mc_block_size);
 end
 
-function [detect, first_detect, first_encounter, effective_pulses] = ...
+function [detect, first_detect, first_encounter, pulse_score] = ...
     cone_line_snr_core(fasan_D, fasan_d, ...
-    line_scan, f, omiga, UP, UV, init_beam_idx, R, jiaodu)
+    line_scan, f, omiga, UP, UV, init_beam_idx, R, jiaodu, window_mode, mc_block_size)
 
-N_KERNAL = 100000;
+N_KERNAL = mc_block_size;
 SNR_THRESHOLD = 2;
 TARGET_W = 0.297;
 FOV_HALF_WIDTH_MULTIPLIER = 3;
+GAUSSIAN_CUTOFF_WIDTH = 3;
 
 if fasan_D <= 0
     error('MC_line_RA_snr_NEW:InvalidLongWidth', ...
@@ -33,14 +43,15 @@ end
 long_half_width = fasan_D / 2;
 gaussian_width = fasan_d / 2;
 fov_short_half_width = FOV_HALF_WIDTH_MULTIPLIER * fasan_d;
+short_prefilter_half_width = GAUSSIAN_CUTOFF_WIDTH * gaussian_width;
 WINDOW_PULSES = max(1, ceil(f * fasan_D / omiga));
 
 photon_model = get_line_photon_model(fasan_D, fasan_d, gaussian_width, R);
 carry_sig = zeros(0, 1);
-carry_noise = zeros(0, 1);
+carry_backscatter = zeros(0, 1);
 carry_step = zeros(0, 1);
 first_encounter = nan;
-effective_pulses = nan;
+pulse_score = empty_detection_window_photons();
 
 P_cycle = line_scan.Directions;
 eL_cycle = line_scan.LongAxes;
@@ -56,18 +67,20 @@ if is_inside_cone(UP, R, jiaodu)
     [long0, short0, front0] = line_offsets_from_frame(U0, B0, EL0, ES0);
     illum0 = 0;
     if front0 && is_line_gaussian_candidate(long0, short0, range0, ...
-            TARGET_W, long_half_width, fov_short_half_width)
+            TARGET_W, long_half_width, short_prefilter_half_width)
         first_encounter = 0;
         illum0 = line_gaussian_target_factor(long0, short0, range0, ...
             TARGET_W, long_half_width, gaussian_width, ...
             fov_short_half_width);
     end
-    noise0 = lookup_line_noise(photon_model, range0);
+    [~, backscatter0] = lookup_line_noise(photon_model, range0);
     sig0 = calc_line_signal_photons(photon_model, range0, illum0);
-    [detect, first_detect, effective_pulses, ...
-        carry_sig, carry_noise, carry_step] = ...
-        append_and_check_window(carry_sig, carry_noise, carry_step, ...
-        sig0, noise0, 0, WINDOW_PULSES, SNR_THRESHOLD);
+    [detect, first_detect, pulse_score, carry_sig, ...
+        carry_backscatter, carry_step] = ...
+        append_and_check_photon_window( ...
+        carry_sig, carry_backscatter, carry_step, ...
+        sig0, backscatter0, 0, photon_model.N_bg, ...
+        photon_model.N_dark, WINDOW_PULSES, SNR_THRESHOLD, window_mode);
     if detect
         return;
     end
@@ -106,7 +119,7 @@ while true
         [long_offset, short_offset, front] = line_offsets_from_frame( ...
             U_block, B_block, EL_block, ES_block);
         judge = front & is_line_gaussian_candidate(long_offset, short_offset, ...
-            z_block, TARGET_W, long_half_width, fov_short_half_width);
+            z_block, TARGET_W, long_half_width, short_prefilter_half_width);
 
         illum_arr = zeros(block_len, 1);
         hit_idx = find(judge);
@@ -121,17 +134,20 @@ while true
                 gaussian_width, fov_short_half_width);
         end
 
-        noise_arr = lookup_line_noise(photon_model, z_block);
+        [~, backscatter_arr] = lookup_line_noise(photon_model, z_block);
         sig_arr = zeros(block_len, 1);
         if ~isempty(hit_idx)
             sig_arr(hit_idx) = calc_line_signal_photons( ...
                 photon_model, z_block(hit_idx), illum_arr(hit_idx));
         end
 
-        [detect, first_detect, effective_pulses, ...
-            carry_sig, carry_noise, carry_step] = ...
-            append_and_check_window(carry_sig, carry_noise, carry_step, ...
-            sig_arr, noise_arr, step_arr, WINDOW_PULSES, SNR_THRESHOLD);
+        [detect, first_detect, pulse_score, carry_sig, ...
+            carry_backscatter, carry_step] = ...
+            append_and_check_photon_window( ...
+            carry_sig, carry_backscatter, carry_step, ...
+            sig_arr, backscatter_arr, step_arr, ...
+            photon_model.N_bg, photon_model.N_dark, ...
+            WINDOW_PULSES, SNR_THRESHOLD, window_mode);
         if detect
             return;
         end
@@ -233,12 +249,13 @@ cached_key = key;
 cached_model = model;
 end
 
-function N_noise = lookup_line_noise(model, z)
+function [N_noise, N_bs] = lookup_line_noise(model, z)
 z = z(:);
 idx = round(z ./ model.z_step) + 1;
 idx(~isfinite(idx)) = 1;
 idx = max(1, min(numel(model.N_bs_lut), idx));
-N_noise = model.N_bs_lut(idx) + model.N_bg + model.N_dark;
+N_bs = model.N_bs_lut(idx);
+N_noise = N_bs + model.N_bg + model.N_dark;
 end
 
 function N_sig = calc_line_signal_photons(model, z, illumination_factor)
@@ -256,71 +273,6 @@ N_sig(valid) = model.N_tx .* ...
     (model.A_target .* illumination_factor(valid) ./ beam_area) .* ...
     model.rho .* (model.A_rx ./ (pi .* z(valid).^2)) .* ...
     T2_target .* model.eta_sys;
-end
-
-function [detect, first_detect, effective_pulses, ...
-    carry_sig, carry_noise, carry_step] = ...
-    append_and_check_window(carry_sig, carry_noise, carry_step, ...
-    sig_arr, noise_arr, step_arr, window_pulses, threshold)
-detect = 0;
-first_detect = nan;
-effective_pulses = nan;
-sig_arr = sig_arr(:);
-noise_arr = noise_arr(:);
-step_arr = step_arr(:);
-if isempty(sig_arr)
-    return;
-end
-sig_arr(~isfinite(sig_arr)) = 0;
-noise_arr(~isfinite(noise_arr)) = 0;
-
-n_carry = numel(carry_sig);
-all_sig = [carry_sig; sig_arr];
-all_noise = [carry_noise; noise_arr];
-all_step = [carry_step; step_arr];
-n_all = numel(all_sig);
-signal_tail_pos = n_carry + find(sig_arr > 0);
-
-if ~isempty(signal_tail_pos)
-    tail_pos = signal_tail_pos(:);
-    max_len = min(window_pulses, n_all);
-    len_vec = 1:max_len;
-    start_pos = tail_pos - len_vec + 1;
-    valid_len = start_pos >= 1;
-    start_pos(~valid_len) = 1;
-
-    pulse_var = all_sig + all_noise;
-    pulse_score = zeros(size(all_sig));
-    score_valid = all_sig > 0 & pulse_var > 0 & isfinite(pulse_var);
-    pulse_score(score_valid) = all_sig(score_valid).^2 ./ pulse_var(score_valid);
-    cs_score = [0; cumsum(pulse_score)];
-    win_score = cs_score(tail_pos + 1) - cs_score(start_pos);
-    win_snr = sqrt(win_score);
-    win_snr(~valid_len | win_score <= 0 | ~isfinite(win_snr)) = -inf;
-
-    hit_matrix = win_snr >= threshold;
-    ok = find(any(hit_matrix, 2), 1, 'first');
-    if ~isempty(ok)
-        successful_len = find(hit_matrix(ok, :), 1, 'first');
-        successful_start = start_pos(ok, successful_len);
-        detect = 1;
-        first_detect = all_step(tail_pos(ok));
-        effective_pulses = nnz( ...
-            pulse_score(successful_start:tail_pos(ok)) > 0);
-        return;
-    end
-end
-
-n_keep = min(window_pulses - 1, n_all);
-if n_keep > 0
-    carry_sig = all_sig(end - n_keep + 1:end);
-    carry_noise = all_noise(end - n_keep + 1:end);
-    carry_step = all_step(end - n_keep + 1:end);
-else
-    carry_sig = zeros(0, 1);
-    carry_noise = zeros(0, 1);
-    carry_step = zeros(0, 1);
-end
 end
 
 function candidate = is_line_gaussian_candidate(long_offset, short_offset, z, ...
